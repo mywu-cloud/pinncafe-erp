@@ -1,0 +1,15 @@
+name = "pinncafe-erp"
+compatibility_date = "2026-01-01"
+pages_build_output_dir = "web"
+
+# D1 資料庫：建立後把 database_id 換成實際值
+#   npx wrangler d1 create pinncafe-erp
+[[d1_databases]]
+binding = "DB"
+database_name = "pinncafe-erp"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Cloudflare Access（正式環境在 Pages 專案的環境變數設定，不要寫在這裡也可以）
+# [vars]
+# CF_ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+# CF_ACCESS_AUD = "Access Application 的 AUD Tag"

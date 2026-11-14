@@ -2,6 +2,9 @@
 
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
+>
+> **實作狀態**：Phase 1 已完成（建表語法見 `db/schema.sql`）。Phase 1 的實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)，各表欄位也已同步更新。
+> 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
 
@@ -17,6 +20,7 @@
 8. [業務規則](#8-業務規則)
 9. [日期區間查詢與報表](#9-日期區間查詢與報表)
 10. [原規劃檢查結果](#10-原規劃檢查結果)
+11. [Phase 1 實作決議](#11-phase-1-實作決議)
 
 ---
 
@@ -30,7 +34,7 @@
 | | 產品 products | 原規劃 |
 | | 生豆品項 green_beans | **新增** |
 | | 配方 product_recipes | **新增** |
-| | 包材 packaging_items | **新增** |
+| | 包材 packaging_items | **新增**（主檔與進貨已提前至 Phase 1） |
 | | 銀行帳戶 bank_accounts | **新增** |
 | 交易 | 進貨 purchases / purchase_items | 原規劃 |
 | | 銷貨 sales / sale_items | 原規劃 |
@@ -42,6 +46,7 @@
 | | 熟豆庫存 roasted_lots | **新增** |
 | | 庫存異動 inventory_movements | **新增** |
 | | 盤點 stock_counts / stock_count_items | **新增** |
+| | 單號流水號 doc_sequences | **新增**（Phase 1） |
 | 財務 | 銀行收支 bank_transactions | 原規劃 |
 | | 收付款沖帳 payment_allocations | **新增** |
 | | 費用支出 expenses | **新增** |
@@ -89,7 +94,7 @@
 | is_active | bool | |
 | created_at / updated_at | datetime | |
 
-### 2.3 客戶喜好 `customer_preferences`（客戶子表）
+### 2.3 客戶喜好 `customer_preferences`（客戶子表，一個客戶可有多筆；Phase 1 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
@@ -122,13 +127,14 @@
 | safety_stock_kg | decimal | 安全庫存量 |
 | note | text | |
 | is_active | bool | |
+| created_at / updated_at | datetime | |
 
 ### 2.5 產品 `products`
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | product_id | PK | 產品編號 |
-| sku | text | 料號／條碼 |
+| sku | text | 料號／條碼（不可重複，可空白） |
 | name | text | 產品名稱 |
 | category | enum | 單品豆／綜合豆／濾掛／禮盒／器具／其他 |
 | roast_level | enum | 烘焙度 |
@@ -136,7 +142,9 @@
 | retail_price | decimal | 零售價 |
 | wholesale_price | decimal | 批發價 |
 | shelf_life_days | int | 賞味期（天，從烘焙日起算） |
+| note | text | 備註 |
 | is_active | bool | |
+| created_at / updated_at | datetime | |
 
 ### 2.6 配方 `product_recipes`（產品 BOM）
 
@@ -160,6 +168,11 @@
 | unit_cost | decimal | 參考單價 |
 | supplier_id | FK → suppliers | |
 | safety_stock | int | 安全庫存 |
+| note | text | 備註 |
+| is_active | bool | 是否啟用 |
+| created_at / updated_at | datetime | |
+
+> 包材庫存同樣由 `inventory_movements`（item_type = 包材）加總，見 view `v_packaging_stock`。
 
 ### 2.8 銀行帳戶 `bank_accounts`
 
@@ -182,16 +195,22 @@
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| purchase_id | PK | 進貨單號 |
+| purchase_id | PK | 內部流水編號（整數） |
+| purchase_no | text UNIQUE | 進貨單號。自動產生 `P{YYYYMMDD}-{NN}`（例：P20261114-01），存檔前可手動修改 |
 | purchase_date | date **IDX** | 進貨日期 |
-| supplier_id | FK → suppliers | |
-| total_amount | decimal `auto` | 合計 |
-| tax_amount | decimal | 稅額 |
-| shipping_fee | decimal | 運費／報關費（攤入成本） |
+| supplier_id | FK → suppliers **IDX** | |
+| items_amount | decimal `auto` | 明細小計合計 |
+| shipping_fee | decimal | 運費／報關費（攤入生豆成本） |
+| tax_amount | decimal | 稅額（攤入生豆成本） |
+| total_amount | decimal `auto` | 合計 = 明細小計 + 運費 + 稅額 |
 | invoice_no | text | 供應商發票號碼 |
-| payment_status | enum `auto` | 未付／部分付款／已付清 |
+| payment_status | enum `auto` | 未付／部分付款／已付清（Phase 1 一律「未付」，Phase 3 沖帳後自動更新） |
 | due_date | date | 應付日期 |
 | note | text | |
+| created_by | text | 操作者 email（Cloudflare Access） |
+| created_at / updated_at | datetime | |
+
+> 金額一律新台幣；國外供應商請換算成台幣後輸入。
 
 ### 3.2 進貨明細 `purchase_items`
 
@@ -199,12 +218,17 @@
 |---|---|---|
 | item_id | PK | |
 | purchase_id | FK → purchases | |
-| item_type | enum | 生豆／包材／其他 |
-| bean_id / packaging_id | FK | 品項 |
-| lot_no | text | 生豆批號（存檔時建立 green_bean_lots） |
-| qty | decimal | 數量（kg／個） |
+| line_no | int | 明細行號（同一張單內不重複） |
+| item_type | enum | 生豆／包材（「其他」尚未開放） |
+| bean_id / packaging_id | FK | 品項（依 item_type 二擇一） |
+| qty | decimal | 數量（生豆 kg／包材依主檔單位） |
 | unit_price | decimal | 單價 |
-| amount | decimal `auto` | 小計 |
+| amount | decimal `auto` | 小計 = 數量 × 單價 |
+| alloc_amount | decimal `auto` | 攤入的運費＋稅額（只有生豆有，包材為 0） |
+| landed_unit_cost | decimal `auto` | 入庫單位成本 =（小計 + 攤提）÷ 數量 |
+| note | text | |
+
+> 生豆批號 `lot_no` 不存在明細表，存檔時寫入 `green_bean_lots`（以 `purchase_item_id` 一對一對應）。
 
 ### 3.3 銷貨 `sales`（表頭）
 
@@ -290,15 +314,18 @@
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| lot_id | PK | 生豆批號 |
-| bean_id | FK → green_beans | |
-| purchase_item_id | FK → purchase_items | 來源進貨 |
-| received_date | date | 入庫日期 |
+| lot_id | PK | 內部流水編號（整數） |
+| lot_no | text UNIQUE | 生豆批號。自動產生 `L{YYYYMMDD}-{NN}`（例：L20261114-01），存檔前可手動修改 |
+| bean_id | FK → green_beans **IDX** | |
+| purchase_item_id | FK → purchase_items（UNIQUE） | 來源進貨明細 |
+| received_date | date **IDX** | 入庫日期（= 進貨日期） |
 | initial_kg | decimal | 入庫重量 |
-| unit_cost | decimal | 每 kg 成本（含攤提運費） |
-| current_kg | decimal `auto` | 現有重量（異動加總） |
+| unit_cost | decimal | 每 kg 成本（含攤提運費＋稅額） |
 | storage_location | text | 存放位置 |
-| status | enum | 使用中／已用完 |
+| note | text | |
+| created_at | datetime | |
+
+> `current_kg`（現有重量）與 `status`（使用中／已用完）**不存欄位**，由 view `v_green_bean_lot_stock` 依 `inventory_movements` 加總即時算出；view 另提供 `other_movement_count`（進貨入庫以外的異動筆數，> 0 代表批號已被使用）。
 
 ### 4.2 烘焙批次 `roast_batches`（簡化版）
 
@@ -349,11 +376,23 @@
 | movement_type | enum | 進貨入庫／烘焙投入／烘焙產出／包裝耗用／銷貨出庫／退貨／盤盈／盤虧／試喝／樣品／報廢 |
 | qty | decimal | 正數 = 入庫、負數 = 出庫 |
 | unit_cost | decimal | |
-| ref_doc_type / ref_doc_id | text | 來源單據 |
+| amount | decimal `auto` | qty × unit_cost（帶正負號，加總即為庫存金額） |
+| ref_doc_type / ref_doc_id | text / int | 來源單據（例：purchases / purchase_id） |
+| ref_item_id | int | 來源單據明細（例：purchase_items.item_id） |
 | note | text | |
-| created_by | FK → users | |
+| created_by | text | 操作者 email（Cloudflare Access；Phase 5 建立 users 表後再關聯） |
+| created_at | datetime | |
 
 > 所有庫存數量皆由此表加總計算，**不直接修改庫存數字**。
+
+> 進貨入庫的 `movement_date` = 進貨日期 00:00:00。索引：`movement_date`、`(item_type, item_ref_id, movement_date)`、`(ref_doc_type, ref_doc_id)`。
+
+### 4.5.1 單號流水號 `doc_sequences`
+
+| 欄位 | 說明 |
+|---|---|
+| prefix + ymd | PK。prefix：`P` 進貨單、`L` 生豆批號；ymd：`YYYYMMDD` |
+| last_no | 當日已用到的最大流水號（只增不減，刪單後號碼不重複使用） |
 
 ### 4.6 盤點 `stock_counts` / `stock_count_items`
 
@@ -465,11 +504,19 @@ erDiagram
 
 ## 8. 業務規則
 
-### 8.1 進貨存檔
-1. 生豆明細 → 建立 `green_bean_lots`（批號）
-2. 寫入 `inventory_movements`（進貨入庫，+kg）
-3. 運費／報關費依重量比例攤入每 kg 成本
+### 8.1 進貨存檔（Phase 1 已實作）
+1. 生豆明細 → 建立 `green_bean_lots`（批號）；包材明細不建批號
+2. 生豆、包材明細皆寫入 `inventory_movements`（進貨入庫，+數量）
+3. **成本攤提**：運費／報關費＋稅額**只攤給生豆**，依 kg 比例攤入每 kg 成本（尾差歸最後一筆生豆）；包材維持原單價。整張單沒有生豆時不攤提，運費與稅額只計入合計
+   ```
+   攤提金額(每筆生豆) = (運費 + 稅額) × 該筆 kg ÷ 本單生豆總 kg
+   生豆每 kg 成本     = (小計 + 攤提金額) ÷ kg
+   合計               = 明細小計 + 運費 + 稅額
+   ```
 4. 付款狀態預設「未付」，產生應付帳款
+5. **單號／批號**：進貨單號 `P{YYYYMMDD}-{NN}`、批號 `L{YYYYMMDD}-{NN}`（日期為進貨日期、當日流水號），留空自動產生，也可手動輸入，不可重複
+6. **修改／刪除**：進貨單內的生豆批號都還沒有其他異動（烘焙投入、樣品、盤點…）時可修改或刪除，修改時整張重寫明細、批號與異動；任一批號已被使用，或已有付款紀錄 → 整張單鎖定，只能檢視
+7. 表頭、明細、批號、異動在同一個 D1 batch（單一交易）內完成
 
 ### 8.2 烘焙批次存檔
 1. 每筆投入明細 → `inventory_movements`（烘焙投入，−kg）扣生豆庫存
@@ -544,3 +591,44 @@ erDiagram
 | — | ❌ 缺少 | 熟豆庫存、包材庫存、庫存異動表 |
 | — | ❌ 缺少 | 應收／應付、費用支出 |
 | — | ❌ 缺少 | 退貨折讓、盤點、訂閱、發票、權限日誌 |
+
+---
+
+## 11. Phase 1 實作決議
+
+開發 Phase 1 時與使用者確認的決議，以及因此對原規格的調整。
+
+| # | 項目 | 決議 |
+|---|---|---|
+| 1 | 進貨品項 | 生豆＋包材。包材主檔 `packaging_items` 與包材庫存由 Phase 4 提前到 Phase 1；item_type「其他」暫不開放 |
+| 2 | 稅額 | 稅額與運費一樣攤入成本（不視為可扣抵進項稅） |
+| 3 | 混合進貨攤提 | 運費＋稅額只攤給生豆、依 kg 比例；包材不攤 |
+| 4 | 編號 | 進貨單號、生豆批號自動產生且可修改。主鍵改用整數流水號，另設 `purchase_no`、`lot_no`（UNIQUE） |
+| 5 | 進貨單修改 | 批號未被使用前可修改／刪除，使用後鎖定 |
+| 6 | 介面 | API ＋ 後台管理頁（`web/admin`，繁體中文，紅 = 增加／入庫、綠 = 減少／出庫） |
+| 7 | 登入驗證 | Cloudflare Access。API 驗證 `Cf-Access-Jwt-Assertion`，以 email 寫入 `created_by`；`users` 表仍在 Phase 5 |
+| 8 | 庫存查詢 | 生豆品項彙總（期初／入庫／出庫／期末 kg 與金額），可展開批號，再點入異動明細 |
+| 9 | 客戶喜好 | `customer_preferences` 與客戶主檔一起在 Phase 1 完成 |
+| 10 | 幣別 | 一律新台幣，不記外幣與匯率 |
+
+其他實作細節：
+
+- **現有庫存不存欄位**：`green_bean_lots.current_kg`／`status` 改由 view 計算，避免與異動表不一致。
+- **日期區間庫存**：期初 = 起日之前的異動加總；期末 = 迄日當天結束的庫存；未給起日則期初為 0。
+- **主檔刪除**：已被單據或庫存異動引用的主檔不可刪除，改用 `is_active` 停用。
+- **enum 欄位**直接存中文值，以 CHECK 限制；日期存 `YYYY-MM-DD` 文字，時間為台灣時間（UTC+8）。
+- **D1 沒有互動式交易**，以 `db.batch()` 達成「單據與庫存在同一交易內完成」。
+
+### API 一覽（Phase 1）
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/suppliers`、`/api/customers`、`/api/green-beans`、`/api/packaging-items`、`/api/products` | GET（`?q=&active=`）／POST | 列表、新增 |
+| 同上 `/{id}` | GET／PUT／PATCH／DELETE | 讀取、修改、刪除。客戶的 `preferences` 陣列隨客戶一起讀寫 |
+| `/api/purchases` | GET（`?from=&to=&supplier_id=&bean_id=`）／POST | 進貨查詢（含合計、未付款）、新增 |
+| `/api/purchases/{id}` | GET／PUT／DELETE | 讀取（含 `locked`）、修改、刪除 |
+| `/api/purchases/next-no?date=` | GET | 預覽下一個進貨單號與批號流水號 |
+| `/api/inventory/green-beans` | GET（`?from=&to=&bean_id=&show_empty=1`） | 生豆庫存：品項彙總＋批號 |
+| `/api/inventory/packaging` | GET（`?from=&to=`） | 包材庫存 |
+| `/api/inventory/movements` | GET（`?item_type=&from=&to=&bean_id=&lot_id=&packaging_id=&movement_type=`） | 庫存異動明細 |
+| `/api/me` | GET | 目前登入者 |
