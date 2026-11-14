@@ -6,19 +6,19 @@
 //   4. 熟豆不夠扣 → 回 409（code = SHORTAGE）；前端提醒後帶 allow_shortage 重送即可存檔：
 //        不足的量記在最近一個批次上（該批次庫存變負數）；完全沒有烘焙批次時該筆不扣庫存
 //   5. 明細記錄出貨當下成本（cost_amount、unit_cost）供毛利計算
-//   6. 收款狀態：現金／LINE Pay／刷卡 → 已收清；轉帳／貨到付款／月結 → 未收；可手動指定
-//      （銀行入帳與沖帳在 Phase 3）
+//   6. 收款狀態（Phase 3）：一律由收款沖帳決定（銀行收支入帳 → 沖銷售單），不能手動指定。
+//      已沖帳的銷貨單仍可修改；改後金額小於已收 → 標示溢收。有沖帳的銷貨單不可刪除。
 //   7. 包材耗用（配方）在 Phase 4
 // 修改 = 整張重寫明細與異動，FIFO 重新計算。表頭、明細、異動在同一個 D1 batch（單一交易）。
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
 import { GRIND_SIZES } from '../master/resources.js';
+import { statusStatement, docPayments } from '../lib/payment.js';
 
 export const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
 export const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
 export const PAY_STATUS = ['未收', '部分收款', '已收清'];
-const PAID_ON_SALE = ['現金', 'LINE Pay', '刷卡'];
 const EPS = 0.0005;
 
 /** 驗證輸入、FIFO 配批次並算出所有 auto 欄位 */
@@ -36,9 +36,6 @@ async function prepare(db, body, { excludeSaleId = null, keepNo = null } = {}) {
   if (!CHANNELS.includes(channel)) throw new HttpError(400, `通路必須是：${CHANNELS.join('／')}`);
   const payment_method = body.payment_method || '現金';
   if (!PAY_METHODS.includes(payment_method)) throw new HttpError(400, `付款方式必須是：${PAY_METHODS.join('／')}`);
-  let payment_status = body.payment_status || null;
-  if (payment_status && !PAY_STATUS.includes(payment_status)) throw new HttpError(400, `收款狀態必須是：${PAY_STATUS.join('／')}`);
-  if (!payment_status) payment_status = PAID_ON_SALE.includes(payment_method) ? '已收清' : '未收';
 
   const num = (v, name) => {
     const n = v === undefined || v === null || v === '' ? 0 : Number(v);
@@ -154,7 +151,7 @@ async function prepare(db, body, { excludeSaleId = null, keepNo = null } = {}) {
     header: {
       sale_no, sale_date, customer_id, channel, subtotal, discount, shipping_fee, total_amount,
       cost_amount: round(items.reduce((s, it) => s + it.cost_amount, 0)),
-      payment_method, payment_status,
+      payment_method,
       due_date: body.due_date || null,
       note: (body.note || '').trim() || null,
     },
@@ -212,6 +209,9 @@ async function getSale(db, id) {
   }
   header.items = items;
   header.gross_profit = round(header.subtotal - header.discount - header.cost_amount);
+  Object.assign(header, await docPayments(db, 'sales', id));
+  header.unpaid_amount = round(Math.max(0, header.total_amount - header.paid_amount));
+  header.overpaid = round(Math.max(0, header.paid_amount - header.total_amount));
   return header;
 }
 
@@ -295,18 +295,24 @@ export async function handleSales(id, request, env, user) {
     const { results } = await db.prepare(
       `SELECT s.*, c.name AS customer_name,
               (SELECT COUNT(*) FROM sale_items x WHERE x.sale_id = s.sale_id) AS item_count,
-              (SELECT COALESCE(SUM(x.deduct_kg), 0) FROM sale_items x WHERE x.sale_id = s.sale_id) AS roasted_kg
+              (SELECT COALESCE(SUM(x.deduct_kg), 0) FROM sale_items x WHERE x.sale_id = s.sale_id) AS roasted_kg,
+              COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = 'sales' AND a.doc_id = s.sale_id), 0) AS paid_amount
        FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
        ${f.where.length ? 'WHERE ' + f.where.join(' AND ') : ''}
        ORDER BY s.sale_date DESC, s.sale_id DESC`,
     ).bind(...f.binds).all();
-    for (const r of results) r.gross_profit = round(r.subtotal - r.discount - r.cost_amount);
+    for (const r of results) {
+      r.gross_profit = round(r.subtotal - r.discount - r.cost_amount);
+      r.paid_amount = round(r.paid_amount);
+      r.unpaid_amount = round(Math.max(0, r.total_amount - r.paid_amount));
+      r.overpaid = round(Math.max(0, r.paid_amount - r.total_amount));
+    }
     const summary = {
       count: results.length,
       total_amount: round(results.reduce((s, r) => s + r.total_amount, 0)),
       cost_amount: round(results.reduce((s, r) => s + r.cost_amount, 0)),
       gross_profit: round(results.reduce((s, r) => s + r.gross_profit, 0)),
-      unpaid_amount: round(results.filter((r) => r.payment_status !== '已收清').reduce((s, r) => s + r.total_amount, 0)),
+      unpaid_amount: round(results.reduce((s, r) => s + r.unpaid_amount, 0)),
       roasted_kg: round(results.reduce((s, r) => s + r.roasted_kg, 0), 3),
     };
     return json({ from: f.from, to: f.to, data: results, summary });
@@ -319,9 +325,10 @@ export async function handleSales(id, request, env, user) {
     await db.batch([
       db.prepare(
         `INSERT INTO sales (sale_no, sale_date, customer_id, channel, subtotal, discount, shipping_fee, total_amount, cost_amount, payment_method, payment_status, due_date, note, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.payment_status, h.due_date, h.note, user),
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '未收', ?, ?, ?)`,
+      ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.due_date, h.note, user),
       ...itemStatements(db, p, user),
+      db.prepare(`UPDATE sales SET payment_status = '已收清' WHERE sale_no = ? AND total_amount <= 0.005`).bind(h.sale_no),
     ]);
     const row = await db.prepare('SELECT sale_id FROM sales WHERE sale_no = ?').bind(h.sale_no).first();
     return json({ data: await getSale(db, row.sale_id), shortages: p.shortages }, 201);
@@ -341,16 +348,18 @@ export async function handleSales(id, request, env, user) {
       ...clearStatements(db, sid),
       db.prepare(
         `UPDATE sales SET sale_no = ?, sale_date = ?, customer_id = ?, channel = ?, subtotal = ?, discount = ?, shipping_fee = ?, total_amount = ?,
-                cost_amount = ?, payment_method = ?, payment_status = ?, due_date = ?, note = ?, updated_at = ? WHERE sale_id = ?`,
-      ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.payment_status, h.due_date, h.note, nowTW(), sid),
+                cost_amount = ?, payment_method = ?, due_date = ?, note = ?, updated_at = ? WHERE sale_id = ?`,
+      ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.due_date, h.note, nowTW(), sid),
       ...itemStatements(db, p, user),
+      statusStatement(db, 'sales', [sid]),
     ]);
     return json({ data: await getSale(db, sid), shortages: p.shortages });
   }
 
-  // ---- 刪除：熟豆庫存加回 ----
+  // ---- 刪除：熟豆庫存加回；有收款沖帳時不可刪 ----
   if (method === 'DELETE') {
-    await getSale(db, sid);
+    const cur = await getSale(db, sid);
+    if (cur.payments.length) throw new HttpError(409, `這張銷貨單已有 ${cur.payments.length} 筆收款沖帳（${cur.payments.map((x) => x.txn_no).join('、')}），請先到銀行收支刪除沖帳`);
     await db.batch([
       ...clearStatements(db, sid),
       db.prepare('DELETE FROM sales WHERE sale_id = ?').bind(sid),

@@ -1,4 +1,4 @@
-// 咖啡烘豆進銷存 — 後台管理（Phase 1＋2）
+// 咖啡烘豆進銷存 — 後台管理（Phase 1～3）
 // 純 JavaScript，無建置步驟。顏色慣例：紅 = 增加／入庫，綠 = 減少／出庫。
 'use strict';
 
@@ -135,6 +135,27 @@ const MASTERS = {
     ],
     hint: '熟豆品項 = 烘焙批次的產出（例：招牌綜合 中深焙）。建立後到「產品」主檔指定每個產品使用哪個熟豆品項。',
   },
+  'bank-accounts': {
+    title: '銀行帳戶', pk: 'account_id',
+    cols: [['account_name', '帳戶名稱'], ['account_type', '類型'], ['bank_name', '銀行'], ['account_no_masked', '帳號末四碼'], ['opening_balance', '期初餘額', 'num'], ['opening_date', '期初日期']],
+    fields: [
+      ['account_name', '帳戶名稱', 'text', { required: true }],
+      ['account_type', '類型', 'enum', { values: ['銀行', '現金', 'LINE Pay', '信用卡收單', '電商平台'], noBlank: true }],
+      ['bank_name', '銀行名稱'], ['account_no_masked', '帳號末四碼（不要填完整帳號）'],
+      ['opening_balance', '期初餘額', 'number'], ['opening_date', '期初日期', 'date'],
+      ['note', '備註', 'textarea', { full: true }],
+    ],
+    hint: '現金、LINE Pay、刷卡收單也各建一個帳戶，收款時選對帳戶，餘額才會對得上。期初日期建議填開帳日的前一天，交易日期不可早於期初日期。',
+  },
+  'expense-categories': {
+    title: '費用類別', pk: 'category_id',
+    cols: [['name', '名稱'], ['allocate_to_roast', '預設攤入烘焙', 'yn']],
+    fields: [
+      ['name', '名稱', 'text', { required: true }],
+      ['allocate_to_roast', '新增費用時預設「攤入烘焙成本」', 'bool'],
+      ['note', '備註', 'textarea', { full: true }],
+    ],
+  },
 };
 
 // ---------------------------------------------------------------- 主檔頁
@@ -155,7 +176,7 @@ async function pageMaster(key) {
       const { data } = await api(`/${key}${qs({ q: $('#q').value.trim(), active: $('#active').value })}`);
       $('#list').innerHTML = data.length ? `<table><thead><tr>${m.cols.map(([, l, t]) => `<th class="${t ? 'num' : ''}">${l}</th>`).join('')}<th>狀態</th></tr></thead><tbody>
         ${data.map((r) => `<tr class="clickable ${r.is_active ? '' : 'inactive'}" data-id="${r[m.pk]}">
-          ${m.cols.map(([c, , t]) => `<td class="${t ? 'num' : ''}">${t === 'num2' ? esc(fmt(r[c], 2)) : t ? esc(fmt(r[c])) : esc(r[c])}</td>`).join('')}
+          ${m.cols.map(([c, , t]) => `<td class="${t && t !== 'yn' ? 'num' : ''}">${t === 'yn' ? (r[c] ? '是' : '') : t === 'num2' ? esc(fmt(r[c], 2)) : t ? esc(fmt(r[c])) : esc(r[c])}</td>`).join('')}
           <td>${r.is_active ? '<span class="tag">啟用</span>' : '<span class="tag warn">停用</span>'}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">沒有資料</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => masterForm(key, Number(tr.dataset.id), load));
@@ -185,7 +206,8 @@ async function masterForm(key, id, reload) {
     const input = ([name, label, type = 'text', o = {}]) => {
       const v = row[name];
       let ctl;
-      if (type === 'enum') ctl = `<select name="${name}">${o.noBlank ? '' : '<option value=""></option>'}${o.values.map((x) => `<option ${v === x ? 'selected' : ''}>${x}</option>`).join('')}</select>`;
+      if (type === 'bool') ctl = `<select name="${name}"><option value="0" ${v ? '' : 'selected'}>否</option><option value="1" ${v ? 'selected' : ''}>是</option></select>`;
+      else if (type === 'enum') ctl = `<select name="${name}">${o.noBlank ? '' : '<option value=""></option>'}${o.values.map((x) => `<option ${v === x ? 'selected' : ''}>${x}</option>`).join('')}</select>`;
       else if (type === 'fk') ctl = `<select name="${name}">${options(fkData[o.resource], o.idKey, v, o.blank ? { blank: o.blank } : {})}</select>`;
       else if (type === 'textarea') ctl = `<textarea name="${name}" rows="2">${esc(v)}</textarea>`;
       else ctl = `<input name="${name}" type="${type === 'number' ? 'number' : type}" ${type === 'number' ? 'step="any" min="0"' : ''} value="${esc(v)}" ${o.required ? 'required' : ''}>`;
@@ -255,10 +277,10 @@ async function pagePurchases() {
       const { data, summary } = await api('/purchases' + qs({ from: $('#from').value, to: $('#to').value, supplier_id: $('#sup').value, bean_id: $('#bean').value }));
       $('#stats').innerHTML = [['進貨單數', fmt(summary.count)], ['生豆進貨 kg', kg(summary.bean_kg)], ['金額合計', money(summary.total_amount)], ['未付款', money(summary.unpaid_amount)]]
         .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-      $('#list').innerHTML = data.length ? `<table><thead><tr><th>進貨日期</th><th>單號</th><th>供應商</th><th class="num">明細數</th><th class="num">生豆 kg</th><th class="num">運費</th><th class="num">稅額</th><th class="num">合計</th><th>付款</th><th>發票</th></tr></thead><tbody>
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>進貨日期</th><th>單號</th><th>供應商</th><th class="num">明細數</th><th class="num">生豆 kg</th><th class="num">運費</th><th class="num">稅額</th><th class="num">合計</th><th class="num">未付</th><th>付款</th><th>發票</th></tr></thead><tbody>
         ${data.map((r) => `<tr class="clickable" data-id="${r.purchase_id}"><td>${esc(r.purchase_date)}</td><td>${esc(r.purchase_no)}</td><td>${esc(r.supplier_name)}</td>
           <td class="num">${r.item_count}</td><td class="num up">${r.bean_kg ? '+' + kg(r.bean_kg) : ''}</td><td class="num">${money(r.shipping_fee)}</td><td class="num">${money(r.tax_amount)}</td>
-          <td class="num">${money(r.total_amount)}</td><td><span class="tag ${r.payment_status === '已付清' ? '' : 'warn'}">${esc(r.payment_status)}</span></td><td>${esc(r.invoice_no)}</td></tr>`).join('')}
+          <td class="num">${money(r.total_amount)}</td><td class="num">${r.unpaid_amount ? money(r.unpaid_amount) : ''}</td><td>${statusTag(r.payment_status)}</td><td>${esc(r.invoice_no)}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">此區間沒有進貨單</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => purchaseForm(Number(tr.dataset.id), load));
     } catch (e) { fail(e); }
@@ -290,7 +312,7 @@ async function purchaseForm(id, reload) {
 
     const box = openModal(`
       <h2>${id ? '進貨單 ' + esc(p.purchase_no) : '新增進貨單'}</h2>
-      ${locked ? `<div class="notice">此進貨單已鎖定（${p.locked ? '生豆批號已被使用' : '已有付款紀錄'}），只能檢視，無法修改或刪除。</div>` : ''}
+      ${locked ? `<div class="notice">此進貨單已鎖定（${p.locked ? '生豆批號已被使用' : '已有付款紀錄，要修改請先到銀行收支刪除付款沖帳'}），只能檢視，無法修改或刪除。</div>` : ''}
       <form id="f">
         <div class="form-grid">
           <label>進貨日期 *<input name="purchase_date" type="date" required value="${esc(p.purchase_date)}" ${dis}></label>
@@ -312,13 +334,16 @@ async function purchaseForm(id, reload) {
           <div><span>稅額</span><input name="tax_amount" type="number" step="any" min="0" value="${esc(p.tax_amount)}" style="width:110px;text-align:right" ${dis}></div>
           <div class="grand"><span>合計</span><span id="tTotal"></span></div>
         </div>
+        ${id ? paymentsBlock(p, '付款') : ''}
         <div class="form-actions">
           ${id && !locked ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          ${id && p.payment_status !== '已付清' ? '<button type="button" id="docPay">登錄付款</button>' : ''}
           <button type="button" id="cancel">${locked ? '關閉' : '取消'}</button>${locked ? '' : '<button class="primary">存檔</button>'}
         </div>
       </form>`, true);
 
     const f = $('#f', box);
+    if ($('#docPay', box)) $('#docPay', box).onclick = () => txnForm(DIR_OUT, null, reload, { category: '進貨付款', supplier_id: p.supplier_id, amount: p.unpaid_amount, description: p.purchase_no, allocations: [{ doc_type: 'purchases', doc_id: id, amount: p.unpaid_amount }] });
     const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
 
     // 即時試算（與後端規則相同：運費＋稅只攤生豆、依 kg、尾差給最後一筆）
@@ -640,9 +665,8 @@ async function roastForm(id, reload) {
 const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
 const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
 const PAY_STATUS = ['未收', '部分收款', '已收清'];
-const PAID_ON_SALE = ['現金', 'LINE Pay', '刷卡'];
 const plainOpts = (values, sel, blank = null) => (blank === null ? '' : `<option value="">${blank}</option>`) + values.map((v) => `<option ${v === sel ? 'selected' : ''}>${v}</option>`).join('');
-const payTag = (s) => `<span class="tag ${s === '已收清' ? '' : 'warn'}">${esc(s)}</span>`;
+const payTag = (s, over = 0) => `<span class="tag ${s === '已收清' && !over ? '' : 'warn'}">${esc(over ? '溢收 ' + money(over) : s)}</span>`;
 
 async function pageSales() {
   const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
@@ -666,10 +690,10 @@ async function pageSales() {
       const { data, summary } = await api('/sales' + qs({ from: $('#from').value, to: $('#to').value, customer_id: $('#cust').value, product_id: $('#prod').value, channel: $('#chan').value, payment_status: $('#pay').value }));
       $('#stats').innerHTML = [['銷貨單數', fmt(summary.count), ''], ['營業額', money(summary.total_amount), 'up'], ['熟豆成本', money(summary.cost_amount), ''], ['毛利', money(summary.gross_profit), ''], ['未收款', money(summary.unpaid_amount), ''], ['出貨熟豆 kg', '−' + kg(summary.roasted_kg), 'down']]
         .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
-      $('#list').innerHTML = data.length ? `<table><thead><tr><th>銷貨日期</th><th>單號</th><th>客戶</th><th>通路</th><th class="num">明細數</th><th class="num">小計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">合計</th><th class="num">毛利</th><th>付款方式</th><th>收款</th></tr></thead><tbody>
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>銷貨日期</th><th>單號</th><th>客戶</th><th>通路</th><th class="num">明細數</th><th class="num">小計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">合計</th><th class="num">未收</th><th class="num">毛利</th><th>付款方式</th><th>收款</th></tr></thead><tbody>
         ${data.map((r) => `<tr class="clickable" data-id="${r.sale_id}"><td>${esc(r.sale_date)}</td><td>${esc(r.sale_no)}</td><td>${r.customer_name ? esc(r.customer_name) : '<span class="tag">散客</span>'}</td><td>${esc(r.channel)}</td>
           <td class="num">${r.item_count}</td><td class="num">${money(r.subtotal)}</td><td class="num">${r.discount ? '−' + money(r.discount) : ''}</td><td class="num">${r.shipping_fee ? money(r.shipping_fee) : ''}</td>
-          <td class="num up"><b>${money(r.total_amount)}</b></td><td class="num">${money(r.gross_profit)}</td><td>${esc(r.payment_method)}</td><td>${payTag(r.payment_status)}</td></tr>`).join('')}
+          <td class="num up"><b>${money(r.total_amount)}</b></td><td class="num">${r.unpaid_amount ? money(r.unpaid_amount) : ''}</td><td class="num">${money(r.gross_profit)}</td><td>${esc(r.payment_method)}</td><td>${payTag(r.payment_status, r.overpaid)}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">此區間沒有銷貨單</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => saleForm(Number(tr.dataset.id), load));
     } catch (e) { fail(e); }
@@ -682,7 +706,7 @@ async function pageSales() {
 async function saleForm(id, reload) {
   try {
     const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
-    const s = id ? (await api(`/sales/${id}`)).data : { sale_date: today(), channel: '門市', payment_method: '現金', payment_status: '已收清', items: [{}], discount: 0, shipping_fee: 0 };
+    const s = id ? (await api(`/sales/${id}`)).data : { sale_date: today(), channel: '門市', payment_method: '現金', payment_status: '未收', items: [{}], discount: 0, shipping_fee: 0 };
     const prodOf = (pid) => products.find((p) => p.product_id === Number(pid));
     const priceFor = (p, cust) => (cust?.price_level === '批發價' && p.wholesale_price != null ? p.wholesale_price : p.retail_price);
 
@@ -697,6 +721,7 @@ async function saleForm(id, reload) {
 
     const box = openModal(`
       <h2>${id ? '銷貨單 ' + esc(s.sale_no) : '新增銷貨單'}</h2>
+      ${s.overpaid ? `<div class="notice">已收 ${money(s.paid_amount)}，比合計多 ${money(s.overpaid)}（溢收），請確認金額或到銀行收支調整沖帳。</div>` : ''}
       <form id="f">
         <div class="form-grid">
           <label>銷貨日期 *<input name="sale_date" type="date" required value="${esc(s.sale_date)}"></label>
@@ -704,7 +729,7 @@ async function saleForm(id, reload) {
           <label>客戶<select name="customer_id">${options(customers, 'customer_id', s.customer_id, { blank: '散客（不指定）', label: (c) => `${c.name}（${c.price_level}）` })}</select></label>
           <label>通路<select name="channel">${plainOpts(CHANNELS, s.channel)}</select></label>
           <label>付款方式<select name="payment_method">${plainOpts(PAY_METHODS, s.payment_method)}</select></label>
-          <label>收款狀態<select name="payment_status">${plainOpts(PAY_STATUS, s.payment_status)}</select></label>
+          <label>收款狀態<input value="${esc(s.payment_status)}${s.paid_amount ? `（已收 ${money(s.paid_amount)}）` : ''}" disabled></label>
           <label>應收日期<input name="due_date" type="date" value="${esc(s.due_date)}"></label>
           <label class="full">備註<input name="note" value="${esc(s.note)}"></label>
         </div>
@@ -719,15 +744,19 @@ async function saleForm(id, reload) {
           <div><span>折扣</span><input name="discount" type="number" step="any" min="0" value="${esc(s.discount)}" style="width:110px;text-align:right"></div>
           <div><span>運費</span><input name="shipping_fee" type="number" step="any" min="0" value="${esc(s.shipping_fee)}" style="width:110px;text-align:right"></div>
           <div class="grand"><span>合計</span><span id="tTotal" class="up"></span></div>
-          ${id ? `<div><span>熟豆成本</span><span>${money(s.cost_amount)}</span></div><div><span>毛利（不含運費）</span><span>${money(s.gross_profit)}</span></div>` : ''}
+          ${id ? `<div><span>熟豆成本</span><span>${money(s.cost_amount)}</span></div><div><span>毛利（不含運費）</span><span>${money(s.gross_profit)}</span></div>
+                  <div><span>已收</span><span>${money(s.paid_amount)}</span></div><div><span>未收</span><span>${money(s.unpaid_amount)}</span></div>` : ''}
         </div>
+        ${id ? paymentsBlock(s, '收款') : '<p class="hint">收款狀態由收款沖帳決定：存檔後到「銀行收支」登錄入帳（現金、LINE Pay、刷卡也一樣）並沖銷這張單，或存檔後重新開啟這張單按「登錄收款」。</p>'}
         <div class="form-actions">
           ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          ${id && s.unpaid_amount > 0 ? '<button type="button" id="docRecv">登錄收款</button>' : ''}
           <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
         </div>
       </form>`, true);
 
     const f = $('#f', box);
+    if ($('#docRecv', box)) $('#docRecv', box).onclick = () => txnForm(DIR_IN, null, reload, { category: '銷貨收款', customer_id: s.customer_id, amount: s.unpaid_amount, description: s.sale_no, allocations: [{ doc_type: 'sales', doc_id: id, amount: s.unpaid_amount }] });
     const custOf = () => customers.find((c) => c.customer_id === Number(f.customer_id.value));
     const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
     const recalc = () => {
@@ -775,10 +804,9 @@ async function saleForm(id, reload) {
       if (e.target.matches('[data-del]')) { e.target.closest('tr').remove(); recalc(); }
     });
     f.discount.oninput = f.shipping_fee.oninput = recalc;
-    f.payment_method.onchange = () => { f.payment_status.value = PAID_ON_SALE.includes(f.payment_method.value) ? '已收清' : '未收'; };
     f.customer_id.onchange = () => {
       const c = custOf();
-      if (!id && c && /月結/.test(c.payment_terms || '')) { f.payment_method.value = '月結'; f.payment_status.value = '未收'; }
+      if (!id && c && /月結/.test(c.payment_terms || '')) f.payment_method.value = '月結';
       showPrefs();
     };
     $('#addItem', box).onclick = () => { $('#items', box).insertAdjacentHTML('beforeend', itemRow()); recalc(); };
@@ -995,6 +1023,403 @@ async function openingForm(type, row, reload) {
   } catch (e) { fail(e); }
 }
 
+// ---------------------------------------------------------------- 財務共用
+const DIR_IN = '入帳', DIR_OUT = '出帳';
+const TXN_CATS = { [DIR_IN]: ['銷貨收款', '利息', '其他'], [DIR_OUT]: ['進貨付款', '費用', '手續費', '其他'] };
+const ALL_CATS = ['銷貨收款', '進貨付款', '費用', '轉帳', '手續費', '利息', '其他'];
+const statusTag = (s) => `<span class="tag ${['已收清', '已付清'].includes(s) ? '' : 'warn'}">${esc(s)}</span>`;
+const inAmt = (n) => `<td class="num up">${n ? '+' + money(n) : ''}</td>`;
+const outAmt = (n) => `<td class="num down">${n ? '−' + money(n) : ''}</td>`;
+const statCards = (rows) => rows.map(([k, v, c = '']) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+/** 單據的收付款紀錄（銷貨單、進貨單、費用表單共用） */
+const paymentsBlock = (d, word) => (d.payments?.length
+  ? `<div class="section-title">${word}紀錄</div><div class="table-wrap"><table><thead><tr><th>日期</th><th>收支編號</th><th>帳戶</th><th class="num">沖銷金額</th></tr></thead><tbody>
+      ${d.payments.map((p) => `<tr><td>${esc(p.txn_date)}</td><td>${esc(p.txn_no)}</td><td>${esc(p.account_name)}</td><td class="num">${money(p.amount)}</td></tr>`).join('')}</tbody></table></div>`
+  : `<p class="hint">還沒有${word}紀錄。${word}請到 <a href="#bank">銀行收支</a> 登錄${word === '收款' ? '入帳' : '出帳'}並沖銷這張單。</p>`);
+
+// ---------------------------------------------------------------- 銀行收支
+async function pageBank() {
+  const accounts = await lookup('bank-accounts', true);
+  $('#main').innerHTML = `
+    <h2>銀行收支</h2>
+    <div class="acct-strip" id="accts"></div>
+    <div class="toolbar">
+      <label>帳戶<select id="acc">${options(accounts, 'account_id', null, { blank: '全部帳戶', label: (a) => a.account_name })}</select></label>
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>類別<select id="cat">${plainOpts(ALL_CATS, null, '全部')}</select></label>
+      <label>沖帳<select id="alloc"><option value="">全部</option><option value="open">尚未沖完的收付款</option></select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="addIn" class="primary">＋ 入帳</button><button id="addOut" class="primary">＋ 出帳</button><button id="addTr">⇄ 帳戶互轉</button>
+    </div>
+    <p class="hint">收款、付款都在這裡登錄，再勾選要沖銷的單據：<span class="up">入帳</span>沖銷貨單、<span class="down">出帳</span>沖進貨單或費用，單據的收付款狀態會自動更新。
+      現金、LINE Pay、刷卡收單請各建一個帳戶（主檔 → 銀行帳戶）；把現金存進銀行用「帳戶互轉」。選單一帳戶時會顯示每筆之後的餘額。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  if (!accounts.length) $('#list').innerHTML = '<div class="empty">還沒有任何帳戶，請先到「主檔 → 銀行帳戶」新增（例：台銀公司戶、門市現金、LINE Pay）。</div>';
+
+  const loadAccts = async () => {
+    const { data, total } = await api('/bank-transactions/balances');
+    $('#accts').innerHTML = data.filter((a) => a.is_active).map((a) => `<div class="acct" data-id="${a.account_id}"><div class="k">${esc(a.account_name)}</div><div class="v ${a.balance < 0 ? 'down' : ''}">${money(a.balance)}</div></div>`).join('')
+      + (data.length ? `<div class="acct total"><div class="k">合計餘額</div><div class="v">${money(total)}</div></div>` : '');
+    $$('#accts .acct[data-id]').forEach((el) => el.onclick = () => { $('#acc').value = el.dataset.id; load(); });
+  };
+  const load = async () => {
+    try {
+      loadAccts();
+      const acc = $('#acc').value;
+      const { data, summary } = await api('/bank-transactions' + qs({ account_id: acc, from: $('#from').value, to: $('#to').value, category: $('#cat').value, alloc: $('#alloc').value }));
+      $('#stats').innerHTML = statCards([
+        ...(acc ? [['期初餘額', money(summary.opening_balance)]] : []),
+        ['本期入帳', '+' + money(summary.in_amount), 'up'], ['本期出帳', '−' + money(summary.out_amount), 'down'],
+        ...(acc ? [['期末餘額', money(summary.closing_balance)]] : [['筆數', fmt(summary.count)]]),
+      ]);
+      const showBal = acc && summary.running_balance;
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>帳戶</th><th>類別</th><th>對象</th><th>摘要</th><th class="num">入帳</th><th class="num">出帳</th>${showBal ? '<th class="num">餘額</th>' : ''}<th>沖銷單據</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.txn_id}"><td>${esc(r.txn_date)}</td><td>${esc(r.txn_no)}</td><td>${esc(r.account_name)}</td><td>${esc(r.category)}</td>
+          <td>${r.category === '轉帳' ? (r.direction === DIR_OUT ? '→ ' : '← ') + esc(r.transfer_account_name) : esc(r.counterparty)}</td><td>${esc(r.description)}</td>
+          ${r.direction === DIR_IN ? inAmt(r.amount) + '<td></td>' : '<td></td>' + outAmt(r.amount)}${showBal ? `<td class="num">${money(r.balance)}</td>` : ''}
+          <td>${esc(r.doc_nos)}${['銷貨收款', '進貨付款', '費用'].includes(r.category) && r.unallocated > 0.005 ? ` <span class="tag warn">未沖 ${money(r.unallocated)}</span>` : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有收支</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => txnForm(null, Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#acc').onchange = load;
+  $('#addIn').onclick = () => txnForm(DIR_IN, null, load);
+  $('#addOut').onclick = () => txnForm(DIR_OUT, null, load);
+  $('#addTr').onclick = () => transferForm(null, load);
+  load();
+}
+
+async function txnForm(direction, id, reload, preset = {}) {
+  try {
+    const t = id ? (await api(`/bank-transactions/${id}`)).data : { txn_date: today(), direction, category: TXN_CATS[direction][0], allocations: [], ...preset };
+    if (t.transfer_txn_id) return transferForm(t, reload);
+    direction = t.direction;
+    const isIn = direction === DIR_IN;
+    const [accounts, parties] = await Promise.all([lookup('bank-accounts', true), lookup(isIn ? 'customers' : 'suppliers', true)]);
+    const partyKey = isIn ? 'customer_id' : 'supplier_id';
+    const word = isIn ? '收款' : '付款';
+
+    const box = openModal(`
+      <h2>${id ? `${esc(t.txn_no)}（${direction}）` : `新增${direction}`}</h2>
+      <form id="f">
+        <div class="form-grid">
+          <label>帳戶 *<select name="account_id" required>${options(accounts, 'account_id', t.account_id, { blank: '請選擇', label: (a) => a.account_name })}</select></label>
+          <label>交易日期 *<input name="txn_date" type="date" required value="${esc(t.txn_date)}"></label>
+          <label>金額 *<input name="amount" type="number" step="any" min="0" required value="${esc(t.amount)}" class="${isIn ? 'up' : 'down'}"></label>
+          <label>類別<select name="category">${plainOpts(TXN_CATS[direction], t.category)}</select></label>
+          <label>${isIn ? '客戶' : '供應商'}<select name="${partyKey}">${options(parties, partyKey, t[partyKey], { blank: isIn ? '（不指定／散客）' : '（不指定）' })}</select></label>
+          <label>交易對象（自由填寫）<input name="counterparty" value="${esc(t.counterparty)}" placeholder="選了${isIn ? '客戶' : '供應商'}可留空"></label>
+          <label>銀行交易序號<input name="bank_ref_no" value="${esc(t.bank_ref_no)}"></label>
+          <label class="full">摘要<input name="description" value="${esc(t.description)}"></label>
+        </div>
+        <div class="section-title">沖銷${isIn ? '銷貨單' : '進貨單／費用'} <span class="hint" id="docHint"></span></div>
+        <div class="table-wrap" id="docs"></div>
+        <div class="totals">
+          <div><span>${word}金額</span><span id="tAmt"></span></div>
+          <div><span>本次沖銷</span><span id="tAlloc"></span></div>
+          <div class="grand"><span>未沖金額</span><span id="tLeft"></span></div>
+        </div>
+        <p class="hint">可只沖一部分；未沖的金額之後可以再編輯這筆${direction}補沖。${isIn ? 'LINE Pay／刷卡撥款若已扣手續費，請登錄撥款前的全額入帳，再另記一筆「手續費」出帳。' : ''}</p>
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`, true);
+    const f = $('#f', box);
+    const mine = new Map((t.allocations || []).map((a) => [`${a.doc_type}:${a.doc_id}`, a.amount]));
+    let docs = [];
+
+    const calc = () => {
+      const amt = Number(f.amount.value) || 0;
+      const alloc = $$('#docs [data-alloc]', box).reduce((s, el) => s + (Number(el.value) || 0), 0);
+      $('#tAmt', box).textContent = money(amt);
+      $('#tAlloc', box).textContent = money(alloc);
+      const left = r2(amt - alloc);
+      $('#tLeft', box).innerHTML = left < -0.005 ? `<span class="down">超過 ${money(-left)}</span>` : money(left);
+    };
+    const loadDocs = async () => {
+      const keep = new Map($$('#docs [data-alloc]', box).map((el) => [el.dataset.key, el.value]));
+      const pid = f[partyKey].value;
+      const res = await api('/bank-transactions/open-docs' + qs({ direction, [partyKey]: pid, exclude_txn_id: id }));
+      docs = res.data;
+      $('#docHint', box).textContent = pid ? '' : `（未選${isIn ? '客戶' : '供應商'}，列出全部未${isIn ? '收清' : '付清'}單據）`;
+      $('#docs', box).innerHTML = docs.length ? `<table class="items"><thead><tr><th>單據</th><th>日期</th><th>${isIn ? '客戶' : '對象'}</th><th>${isIn ? '付款方式' : '說明'}</th><th class="num">金額</th><th class="num">其他已沖</th><th class="num">未沖餘額</th><th style="width:130px">本次沖銷</th><th></th></tr></thead><tbody>
+        ${docs.map((d) => {
+          const key = `${d.doc_type}:${d.doc_id}`;
+          const v = keep.has(key) ? keep.get(key) : (mine.get(key) ?? '');
+          return `<tr><td>${esc(d.label)} ${esc(d.doc_no)}</td><td>${esc(d.doc_date)}${d.due_date && d.due_date < today() ? ' <span class="tag warn">逾期</span>' : ''}</td><td>${esc(d.party)}</td><td>${esc(d.info)}</td>
+            <td class="num">${money(d.total)}</td><td class="num">${d.paid ? money(d.paid) : ''}</td><td class="num"><b>${money(d.remaining)}</b></td>
+            <td><input data-alloc data-key="${key}" data-type="${d.doc_type}" data-id="${d.doc_id}" data-max="${d.remaining}" type="number" step="any" min="0" value="${esc(v)}" class="num"></td>
+            <td><button type="button" class="link" data-full>全額</button></td></tr>`;
+        }).join('')}</tbody></table>` : `<div class="empty">沒有未${isIn ? '收清' : '付清'}的單據</div>`;
+      calc();
+    };
+    $('#docs', box).addEventListener('input', calc);
+    $('#docs', box).addEventListener('click', (e) => {
+      if (!e.target.matches('[data-full]')) return;
+      const inp = $('[data-alloc]', e.target.closest('tr'));
+      const others = $$('#docs [data-alloc]', box).filter((el) => el !== inp).reduce((s, el) => s + (Number(el.value) || 0), 0);
+      const amt = Number(f.amount.value) || 0;
+      const max = Number(inp.dataset.max);
+      inp.value = amt ? Math.max(0, Math.min(max, r2(amt - others))) : max;
+      if (!amt) f.amount.value = r2(others + max);
+      calc();
+    });
+    f.amount.oninput = calc;
+    f[partyKey].onchange = loadDocs;
+    $('#cancel', box).onclick = closeModal;
+    await loadDocs();
+
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { ...Object.fromEntries(new FormData(f)), direction };
+      body.allocations = $$('#docs [data-alloc]', box).filter((el) => Number(el.value) > 0)
+        .map((el) => ({ doc_type: el.dataset.type, doc_id: el.dataset.id, amount: el.value }));
+      try {
+        const res = await api(id ? `/bank-transactions/${id}` : '/bank-transactions', { method: id ? 'PUT' : 'POST', body });
+        closeModal();
+        toast(`已存檔 ${res.data.txn_no}` + (res.data.unallocated > 0.005 && ['銷貨收款', '進貨付款', '費用'].includes(res.data.category) ? `（尚有 ${money(res.data.unallocated)} 未沖）` : ''));
+        reload?.();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除 ${t.txn_no}？\n它沖銷的單據會改回未${isIn ? '收' : '付'}，無法復原。`)) return;
+      try { await api(`/bank-transactions/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+async function transferForm(t, reload) {
+  try {
+    const accounts = await lookup('bank-accounts', true);
+    const isOut = t?.direction === DIR_OUT;
+    const fromId = t ? (isOut ? t.account_id : t.transfer_account_id) : null;
+    const toId = t ? (isOut ? t.transfer_account_id : t.account_id) : null;
+    const box = openModal(`
+      <h2>${t ? '帳戶互轉 ' + esc(t.txn_no) : '帳戶互轉'}</h2>
+      <form id="f">
+        <div class="form-grid">
+          <label>轉出帳戶 *<select name="account_id" required>${options(accounts, 'account_id', fromId, { blank: '請選擇', label: (a) => a.account_name })}</select></label>
+          <label>轉入帳戶 *<select name="to_account_id" required>${options(accounts, 'account_id', toId, { blank: '請選擇', label: (a) => a.account_name })}</select></label>
+          <label>日期 *<input name="txn_date" type="date" required value="${esc(t?.txn_date || today())}"></label>
+          <label>金額 *<input name="amount" type="number" step="any" min="0" required value="${esc(t?.amount)}"></label>
+          <label class="full">摘要<input name="description" value="${esc(t?.description)}" placeholder="例：現金存入銀行、LINE Pay 撥款"></label>
+        </div>
+        <p class="hint">會產生兩筆：轉出帳戶一筆<span class="down">出帳</span>、轉入帳戶一筆<span class="up">入帳</span>，修改或刪除時兩筆一起處理。</p>
+        <div class="form-actions">
+          ${t ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`);
+    const f = $('#f', box);
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { ...Object.fromEntries(new FormData(f)), category: '轉帳' };
+      try {
+        await api(t ? `/bank-transactions/${t.txn_id}` : '/bank-transactions', { method: t ? 'PUT' : 'POST', body });
+        closeModal(); toast('已存檔'); reload?.();
+      } catch (err) { fail(err); }
+    };
+    if (t) $('#del', box).onclick = async () => {
+      if (!confirm('確定刪除這筆帳戶互轉？轉出、轉入兩筆會一起刪除。')) return;
+      try { await api(`/bank-transactions/${t.txn_id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 費用支出
+async function pageExpenses() {
+  const cats = await lookup('expense-categories', true);
+  $('#main').innerHTML = `
+    <h2>費用支出</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>類別<select id="cat">${options(cats, 'category_id', null, { blank: '全部' })}</select></label>
+      <label>付款<select id="pay">${plainOpts(['未付', '部分付款', '已付清'], null, '全部')}</select></label>
+      <label>搜尋<input id="q" placeholder="廠商、發票、備註"></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="add" class="primary">＋ 新增費用</button>
+    </div>
+    <p class="hint">這裡只記費用、不動帳戶。付款請到 <a href="#bank">銀行收支</a> 登錄出帳並沖銷這筆費用。「攤入烘焙」目前只做標記，成本攤提在 Phase 5。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/expenses' + qs({ from: $('#from').value, to: $('#to').value, category_id: $('#cat').value, payment_status: $('#pay').value, q: $('#q').value.trim() }));
+      $('#stats').innerHTML = statCards([['筆數', fmt(summary.count)], ['費用合計', money(summary.amount), 'down'], ['未付款', money(summary.unpaid_amount)], ['標記攤入烘焙', money(summary.roast_amount)]]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>類別</th><th>廠商</th><th>發票</th><th class="num">金額</th><th class="num">未付</th><th>付款</th><th>攤入烘焙</th><th>備註</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.expense_id}"><td>${esc(r.expense_date)}</td><td>${esc(r.expense_no)}</td><td>${esc(r.category_name)}</td><td>${esc(r.vendor)}</td><td>${esc(r.invoice_no)}</td>
+          <td class="num down">${money(r.amount)}</td><td class="num">${r.unpaid_amount ? money(r.unpaid_amount) : ''}</td><td>${statusTag(r.payment_status)}</td><td>${r.allocate_to_roast ? '✓' : ''}</td><td>${esc(r.note)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有費用</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => expenseForm(Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#q').onkeydown = (e) => e.key === 'Enter' && load();
+  $('#add').onclick = () => expenseForm(null, load);
+  load();
+}
+
+async function expenseForm(id, reload) {
+  try {
+    const cats = await lookup('expense-categories', true);
+    const e0 = id ? (await api(`/expenses/${id}`)).data : { expense_date: today() };
+    const box = openModal(`
+      <h2>${id ? '費用 ' + esc(e0.expense_no) : '新增費用'}</h2>
+      ${e0.overpaid ? `<div class="notice">已付 ${money(e0.paid_amount)}，比費用金額多 ${money(e0.overpaid)}（溢付），請確認金額或到銀行收支調整沖帳。</div>` : ''}
+      <form id="f">
+        <div class="form-grid">
+          <label>費用日期 *<input name="expense_date" type="date" required value="${esc(e0.expense_date)}"></label>
+          <label>編號<input name="expense_no" value="${esc(e0.expense_no)}" placeholder="自動產生"></label>
+          <label>類別 *<select name="category_id" required>${options(cats, 'category_id', e0.category_id, { blank: '請選擇' })}</select></label>
+          <label>金額 *<input name="amount" type="number" step="any" min="0" required value="${esc(e0.amount)}"></label>
+          <label>廠商<input name="vendor" value="${esc(e0.vendor)}"></label>
+          <label>發票號碼<input name="invoice_no" value="${esc(e0.invoice_no)}"></label>
+          <label>應付日期<input name="due_date" type="date" value="${esc(e0.due_date)}"></label>
+          <label>攤入烘焙成本<select name="allocate_to_roast"><option value="0" ${e0.allocate_to_roast ? '' : 'selected'}>否</option><option value="1" ${e0.allocate_to_roast ? 'selected' : ''}>是</option></select></label>
+          <label>付款狀態<input value="${esc(e0.payment_status || '未付')}" disabled></label>
+          <label class="full">備註<input name="note" value="${esc(e0.note)}"></label>
+        </div>
+        ${id ? paymentsBlock(e0, '付款') : '<p class="hint">存檔後到 <a href="#bank">銀行收支</a> 登錄出帳並沖銷這筆費用。</p>'}
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          ${id && e0.payment_status !== '已付清' ? '<button type="button" id="docPay">登錄付款</button>' : ''}
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`);
+    const f = $('#f', box);
+    if (!id) f.category_id.onchange = () => { // 帶入類別預設的「攤入烘焙」
+      const c = cats.find((x) => x.category_id === Number(f.category_id.value));
+      if (c) f.allocate_to_roast.value = c.allocate_to_roast ? '1' : '0';
+    };
+    $('#cancel', box).onclick = closeModal;
+    if ($('#docPay', box)) $('#docPay', box).onclick = () => txnForm(DIR_OUT, null, reload, { category: '費用', counterparty: e0.vendor, amount: r2(e0.amount - e0.paid_amount), description: `${e0.expense_no} ${e0.category_name}`, allocations: [{ doc_type: 'expenses', doc_id: id, amount: r2(e0.amount - e0.paid_amount) }] });
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const res = await api(id ? `/expenses/${id}` : '/expenses', { method: id ? 'PUT' : 'POST', body: Object.fromEntries(new FormData(f)) });
+        delete cache['expense-categories'];
+        closeModal(); toast(`已存檔 ${res.data.expense_no}`); reload();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除費用 ${e0.expense_no}？無法復原。`)) return;
+      try { await api(`/expenses/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 應收／應付帳款
+const BUCKET_LABELS = [['0-30', '0–30 天'], ['31-60', '31–60 天'], ['61-90', '61–90 天'], ['90+', '90 天以上']];
+function agingTable(data, total, onDoc, { creditCol = false } = {}) {
+  if (!data.length) return '<div class="empty">沒有未結清的單據</div>';
+  return `<table><thead><tr><th>對象／單據</th><th>單據日</th><th>應${creditCol ? '收' : '付'}日</th>${BUCKET_LABELS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th class="num">未結合計</th>${creditCol ? '<th>信用額度</th>' : ''}</tr></thead><tbody>
+    ${data.map((p, i) => `
+      <tr class="clickable bean" data-p="${i}"><td>▸ <b>${esc(p.party)}</b>（${p.count} 張）</td><td></td><td></td>
+        ${BUCKET_LABELS.map(([k]) => `<td class="num">${p[k] ? money(p[k]) : ''}</td>`).join('')}<td class="num"><b>${money(p.total)}</b></td>
+        ${creditCol ? `<td>${p.credit_limit ? (p.over_limit ? `<span class="tag warn">超過額度 ${money(p.credit_limit)}</span>` : money(p.credit_limit)) : ''}</td>` : ''}</tr>
+      ${p.docs.map((d) => `<tr class="sub clickable" data-parent="${i}" data-type="${d.doc_type}" data-id="${d.doc_id}" hidden>
+        <td>${esc(d.kind || '銷貨')} ${esc(d.doc_no)}${d.paid ? `（已沖 ${money(d.paid)}）` : ''}</td><td>${esc(d.doc_date)}</td><td>${esc(d.due_date)}${d.overdue ? ' <span class="tag warn">逾期</span>' : ''}</td>
+        ${BUCKET_LABELS.map(([k]) => `<td class="num">${d.bucket === k ? money(d.remaining) : ''}</td>`).join('')}<td class="num">${money(d.remaining)}</td>${creditCol ? '<td></td>' : ''}</tr>`).join('')}`).join('')}
+    <tr class="total"><td>合計</td><td></td><td></td>${BUCKET_LABELS.map(([k]) => `<td class="num">${money(total[k])}</td>`).join('')}<td class="num">${money(total.total)}</td>${creditCol ? '<td></td>' : ''}</tr>
+    </tbody></table>`;
+}
+function bindAging(onDoc) {
+  $$('#list tr.bean').forEach((tr) => tr.onclick = () => {
+    const subs = $$(`#list tr[data-parent="${tr.dataset.p}"]`);
+    const open = subs[0]?.hidden;
+    subs.forEach((s) => (s.hidden = !open));
+    tr.cells[0].firstChild.textContent = open ? '▾ ' : '▸ ';
+  });
+  $$('#list tr.sub').forEach((tr) => tr.onclick = () => onDoc(tr.dataset.type, Number(tr.dataset.id)));
+  if ($$('#list tr.bean').length === 1) $('#list tr.bean').click();
+}
+
+async function pageReceivables() {
+  const customers = await lookup('customers', true);
+  $('#main').innerHTML = `
+    <h2>應收帳款</h2>
+    <div class="toolbar">
+      <label>截止日<input type="date" id="asof" value="${today()}"></label>
+      <label>客戶<select id="cust"><option value="">全部</option><option value="none">散客</option>${options(customers, 'customer_id', null, { blank: null })}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span><button id="recv" class="primary">＋ 登錄收款</button>
+    </div>
+    <p class="hint">截止日當天（含）之前的銷貨單，扣掉截止日之前的收款沖帳後還沒收清的部分。帳齡從銷貨日起算。點客戶展開單據，點單據開啟銷貨單。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, total } = await api('/finance/receivables' + qs({ as_of: $('#asof').value, customer_id: $('#cust').value }));
+      $('#stats').innerHTML = statCards([['應收合計', money(total.total), 'up'], ...BUCKET_LABELS.map(([k, l]) => [l, money(total[k]), k === '90+' && total[k] ? 'down' : ''])]);
+      $('#list').innerHTML = agingTable(data, total, null, { creditCol: true });
+      bindAging((type, id) => saleForm(id, load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#cust').onchange = load;
+  $('#recv').onclick = () => txnForm(DIR_IN, null, load, { customer_id: Number($('#cust').value) || null });
+  load();
+}
+
+async function pagePayables() {
+  const suppliers = await lookup('suppliers', true);
+  $('#main').innerHTML = `
+    <h2>應付帳款</h2>
+    <div class="toolbar">
+      <label>截止日<input type="date" id="asof" value="${today()}"></label>
+      <label>類型<select id="type"><option value="">進貨＋費用</option><option value="purchases">只看進貨單</option><option value="expenses">只看費用</option></select></label>
+      <label>供應商<select id="sup">${options(suppliers, 'supplier_id', null, { blank: '全部' })}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span><button id="pay" class="primary">＋ 登錄付款</button>
+    </div>
+    <p class="hint">截止日當天（含）之前的進貨單與費用，扣掉截止日之前的付款沖帳後還沒付清的部分（選供應商時只看進貨單）。點對象展開單據，點單據開啟原單。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, total } = await api('/finance/payables' + qs({ as_of: $('#asof').value, type: $('#type').value, supplier_id: $('#sup').value }));
+      $('#stats').innerHTML = statCards([['應付合計', money(total.total), 'down'], ...BUCKET_LABELS.map(([k, l]) => [l, money(total[k])])]);
+      $('#list').innerHTML = agingTable(data, total);
+      bindAging((type, id) => (type === 'purchases' ? purchaseForm(id, load) : expenseForm(id, load)));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#sup').onchange = load;
+  $('#type').onchange = load;
+  $('#pay').onclick = () => txnForm(DIR_OUT, null, load, { supplier_id: Number($('#sup').value) || null });
+  load();
+}
+
+// ---------------------------------------------------------------- 費用分析
+async function pageExpenseSummary() {
+  $('#main').innerHTML = `
+    <h2>費用分析</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${today().slice(0, 4)}-01-01"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <button id="search">查詢</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, months, total, month_totals: mt, roast_amount } = await api('/finance/expense-summary' + qs({ from: $('#from').value, to: $('#to').value }));
+      $('#stats').innerHTML = statCards([['費用合計', money(total), 'down'], ['標記攤入烘焙', money(roast_amount)], ['類別數', fmt(data.length)]]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>類別</th><th class="num">筆數</th><th class="num">合計</th><th class="num">佔比</th><th style="min-width:120px"></th>${months.map((m) => `<th class="num">${m}</th>`).join('')}</tr></thead><tbody>
+        ${data.map((c) => `<tr><td>${esc(c.name)}</td><td class="num">${c.count}</td><td class="num"><b>${money(c.amount)}</b></td><td class="num">${pct(c.share)}</td>
+          <td><div class="bar"><span style="width:${(c.share * 100).toFixed(1)}%"></span></div></td>${months.map((m) => `<td class="num">${c.months[m] ? money(c.months[m]) : ''}</td>`).join('')}</tr>`).join('')}
+        <tr class="total"><td>合計</td><td></td><td class="num">${money(total)}</td><td class="num">100%</td><td></td>${months.map((m) => `<td class="num">${money(mt[m])}</td>`).join('')}</tr>
+        </tbody></table>` : '<div class="empty">此區間沒有費用</div>';
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  load();
+}
+
 // ---------------------------------------------------------------- 路由
 const ROUTES = {
   purchases: pagePurchases,
@@ -1002,6 +1427,11 @@ const ROUTES = {
   'customer-history': pageCustomerHistory,
   roasts: pageRoasts,
   'opening-stock': pageOpening,
+  bank: pageBank,
+  expenses: pageExpenses,
+  receivables: pageReceivables,
+  payables: pagePayables,
+  'expense-summary': pageExpenseSummary,
   'stock-beans': pageStockBeans,
   'stock-roasted': pageStockRoasted,
   'stock-packaging': pageStockPackaging,

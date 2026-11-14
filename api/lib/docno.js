@@ -5,6 +5,8 @@ const SOURCES = {
   L: ['green_bean_lots', 'lot_no'],    // 生豆批號
   R: ['roast_batches', 'batch_no'],    // 烘焙批次（= 熟豆批號）
   S: ['sales', 'sale_no'],             // 銷貨單
+  T: ['bank_transactions', 'txn_no'],  // 銀行收支
+  E: ['expenses', 'expense_no'],       // 費用
 };
 
 const pad2 = (n) => String(n).padStart(2, '0');

@@ -103,7 +103,7 @@ pinncafe-erp/
 ├── wrangler.toml               # Pages 設定、D1 綁定（binding = DB）
 ├── db/
 │   ├── schema.sql              # 建表語法（全新安裝）
-│   ├── migrations/             # 既有資料庫升級（002_phase2.sql、003_opening_stock.sql）
+│   ├── migrations/             # 既有資料庫升級（002～004）
 │   └── seed.sql                # 範例資料
 ├── functions/api/[[path]].js   # Pages Function 進入點 → api/index.js
 ├── api/
@@ -111,7 +111,8 @@ pinncafe-erp/
 │   ├── lib/                    # 共用工具、Cloudflare Access 驗證
 │   ├── master/                 # 主檔 API
 │   ├── transaction/            # 進貨、銷貨（之後：退貨）
-│   └── inventory/              # 庫存查詢、烘焙批次、期初庫存（之後：盤點）
+│   ├── inventory/              # 庫存查詢、烘焙批次、期初庫存（之後：盤點）
+│   └── finance/                # 銀行收支＋沖帳、費用、應收應付與費用分析
 └── web/
     └── admin/                  # 後台管理（之後：pos/、dashboard/）
 ```
@@ -125,7 +126,7 @@ pinncafe-erp/
 | Phase 1 | 主檔（供應商、客戶＋喜好、生豆品項、包材、產品）＋ 進貨 ＋ 生豆／包材庫存 | ✅ 完成 |
 | Phase 2 | 熟豆品項 ＋ 烘焙批次 ＋ 熟豆庫存 ＋ 銷貨 ＋ 客戶購買紀錄 ＋ 日期區間查詢 | ✅ 完成 |
 | 期初庫存 | 開帳時已有的生豆／包材直接登錄（不經進貨單） | ✅ 完成 |
-| Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 應收應付 ＋ 費用 | |
+| Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 收付款沖帳 ＋ 應收應付 ＋ 費用 ＋ 費用分析 | ✅ 完成 |
 | Phase 4 | 配方、包裝耗用、訂閱、退貨、盤點、發票 | |
 | Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 | |
 
@@ -166,9 +167,16 @@ CF_ACCESS_TEAM_DOMAIN=""
 npm run db:remote:migrate:phase2    # Phase 2：products 加 roasted_bean_id 欄位
 npm run db:remote:migrate:opening   # 期初庫存：重建 inventory_movements（movement_type 新增「期初」）
 npm run db:remote:schema            # 建立新表與 view，不影響既有資料
+npm run db:remote:migrate:phase3    # Phase 3：依沖帳重算收付款狀態（必須在 schema 之後，可重複執行）
 ```
 
 每個 migration 只能跑一次。
+
+### 開始使用 Phase 3
+
+1. 「主檔 → 銀行帳戶」建立帳戶：銀行帳戶、門市現金、LINE Pay、刷卡收單各一個，填期初餘額與期初日期
+2. 收款、付款都在「財務 → 銀行收支」登錄，並勾選沖銷的銷貨單／進貨單／費用（現金收款也一樣）
+3. 房租、瓦斯、電費等在「財務 → 費用支出」登錄，付款時再到銀行收支出帳沖銷
 
 ### Phase 2 升級後的設定
 

@@ -3,7 +3,7 @@
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
 >
-> **實作狀態**：Phase 1、Phase 2 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存），各表欄位也已同步更新。
+> **實作狀態**：Phase 1～3 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存）、[第 14 節](#14-phase-3-實作決議)（Phase 3），各表欄位也已同步更新。
 > 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
@@ -23,6 +23,7 @@
 11. [Phase 1 實作決議](#11-phase-1-實作決議)
 12. [Phase 2 實作決議](#12-phase-2-實作決議)
 13. [期初庫存](#13-期初庫存)
+14. [Phase 3 實作決議](#14-phase-3-實作決議)
 
 ---
 
@@ -38,7 +39,7 @@
 | | 熟豆品項 roasted_beans | **新增**（Phase 2：烘焙產出的熟豆，產品指定使用哪個熟豆） |
 | | 配方 product_recipes | **新增** |
 | | 包材 packaging_items | **新增**（主檔與進貨已提前至 Phase 1） |
-| | 銀行帳戶 bank_accounts | **新增** |
+| | 銀行帳戶 bank_accounts | **新增**（Phase 3 完成） |
 | 交易 | 進貨 purchases / purchase_items | 原規劃（Phase 1 完成） |
 | | 銷貨 sales / sale_items | 原規劃（Phase 2 完成） |
 | | 退貨／折讓 returns / return_items | **新增** |
@@ -49,11 +50,11 @@
 | | 熟豆庫存 roasted_lots | **新增**（Phase 2 完成） |
 | | 庫存異動 inventory_movements | **新增** |
 | | 盤點 stock_counts / stock_count_items | **新增** |
-| | 單號流水號 doc_sequences | **新增**（Phase 1；Phase 2 加入 R、S） |
-| 財務 | 銀行收支 bank_transactions | 原規劃 |
-| | 收付款沖帳 payment_allocations | **新增** |
-| | 費用支出 expenses | **新增** |
-| | 費用類別 expense_categories | **新增** |
+| | 單號流水號 doc_sequences | **新增**（Phase 1；Phase 2 加入 R、S；Phase 3 加入 T、E） |
+| 財務 | 銀行收支 bank_transactions | 原規劃（Phase 3 完成） |
+| | 收付款沖帳 payment_allocations | **新增**（Phase 3 完成） |
+| | 費用支出 expenses | **新增**（Phase 3 完成） |
+| | 費用類別 expense_categories | **新增**（Phase 3 完成） |
 | 系統 | 使用者 users | **新增** |
 | | 操作日誌 audit_logs | **新增** |
 
@@ -180,18 +181,22 @@
 
 > 包材庫存同樣由 `inventory_movements`（item_type = 包材）加總，見 view `v_packaging_stock`。
 
-### 2.8 銀行帳戶 `bank_accounts`
+### 2.8 銀行帳戶 `bank_accounts`（Phase 3 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | account_id | PK | |
-| account_name | text | 帳戶名稱（例：台銀公司戶） |
+| account_name | text | 帳戶名稱（例：台銀公司戶、門市現金、LINE Pay） |
 | account_type | enum | 銀行／現金／LINE Pay／信用卡收單／電商平台 |
 | bank_name | text | 銀行名稱 |
-| account_no_masked | text | 帳號末四碼（不存完整帳號） |
-| opening_balance | decimal | 期初餘額 |
-| opening_date | date | 期初日期 |
+| account_no_masked | text | 帳號末四碼（最多 4 位數字，不存完整帳號） |
+| opening_balance | decimal | 期初餘額（不可為負） |
+| opening_date | date | 期初日期；該帳戶的交易日期不可早於此日 |
+| note | text | 備註 |
 | is_active | bool | |
+| created_at / updated_at | datetime | |
+
+> 現金、LINE Pay、刷卡收單也各建一個帳戶，所有收付款都透過帳戶登錄。
 
 ### 2.9 熟豆品項 `roasted_beans`（Phase 2 新增）
 
@@ -442,48 +447,61 @@
 
 ## 5. 財務
 
-### 5.1 銀行收支 `bank_transactions`
+### 5.1 銀行收支 `bank_transactions`（Phase 3 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| txn_id | PK | |
+| txn_id | PK | 內部流水編號 |
+| txn_no | text UNIQUE | 收支編號，自動產生 `T{YYYYMMDD}-{NN}`（不可修改） |
 | account_id | FK → bank_accounts **IDX** | |
 | txn_date | date **IDX** | 交易日期 |
 | direction | enum | 入帳／出帳 |
 | amount | decimal | 金額（正數） |
-| category | enum | 銷貨收款／進貨付款／費用／轉帳／手續費／利息／其他 |
-| counterparty | text | 交易對象 |
+| category | enum | 銷貨收款／進貨付款／費用／轉帳／手續費／利息／其他（「轉帳」只用於帳戶互轉） |
+| customer_id | FK → customers | 入帳的客戶（選填，用來篩選可沖銷的銷貨單） |
+| supplier_id | FK → suppliers | 出帳的供應商（選填） |
+| counterparty | text | 交易對象（選了客戶／供應商且空白時自動帶名稱） |
 | description | text | 摘要 |
-| ref_doc_type / ref_doc_id | text | 對應單據（sales／purchases／expenses） |
-| reconciled | bool | 是否已對帳 |
-| bank_ref_no | text | 銀行交易序號（匯入 CSV 時比對用） |
+| transfer_txn_id | int | 帳戶互轉的另一筆 |
+| reconciled | bool | 是否已對帳（Phase 5） |
+| bank_ref_no | text | 銀行交易序號（Phase 5 匯入 CSV 時比對用） |
+| created_by | text | 操作者 email |
+| created_at / updated_at | datetime | |
 
-> 帳戶餘額 = 期初餘額 + Σ入帳 − Σ出帳（依日期即可算出任一天餘額）
+> 帳戶餘額 = 期初餘額 + Σ入帳 − Σ出帳（依日期即可算出任一天餘額）。原規格的 `ref_doc_type / ref_doc_id` 改由 `payment_allocations` 取代（一筆可沖多張單）。
 
 ### 5.2 收付款沖帳 `payment_allocations`
 
 | 欄位 | 說明 |
 |---|---|
 | allocation_id | PK |
-| txn_id | FK → bank_transactions |
-| doc_type / doc_id | 沖銷的銷貨單或進貨單 |
-| amount | 沖銷金額 |
+| txn_id | FK → bank_transactions（刪除收支時一併刪除） |
+| doc_type / doc_id | 沖銷的單據：`sales`（入帳）、`purchases`／`expenses`（出帳） |
+| amount | 沖銷金額（> 0） |
 
 > 一筆匯款可沖多張單（批發客戶月結），一張單也可分多次收款。
 
 ### 5.3 費用支出 `expenses` / 費用類別 `expense_categories`
 
+`expense_categories`：category_id、name（UNIQUE）、allocate_to_roast（新增費用時的預設值）、note、is_active。預建：房租／瓦斯／電費／水費／運費／平台手續費／行銷／設備維修／薪資／雜支（瓦斯、電費預設攤入烘焙）。
+
+`expenses`：
+
 | 欄位 | 說明 |
 |---|---|
 | expense_id | PK |
+| expense_no | 費用編號，自動產生 `E{YYYYMMDD}-{NN}`，存檔前可修改 |
 | expense_date | date **IDX** |
-| category_id | FK → expense_categories（房租／瓦斯／電費／水費／運費／平台手續費／行銷／設備維修／薪資／雜支） |
-| amount | 金額 |
+| category_id | FK → expense_categories |
+| amount | 金額（> 0） |
 | vendor | 廠商 |
 | invoice_no | 發票號碼 |
-| account_id | FK → bank_accounts（從哪個帳戶付） |
-| allocate_to_roast | bool：是否攤入烘焙成本（瓦斯、電費） |
-| note | 備註 |
+| allocate_to_roast | bool：是否攤入烘焙成本（Phase 3 只記標記，Phase 5 攤提） |
+| payment_status | 未付／部分付款／已付清（依沖帳自動更新） |
+| due_date | 應付日期 |
+| note、created_by、created_at、updated_at | |
+
+> 原規格的 `account_id`（從哪個帳戶付）拿掉：費用只記費用、不動帳戶，付款由出帳沖帳（見第 14 節）。
 
 ---
 
@@ -578,14 +596,19 @@ erDiagram
 2. 熟豆以**先進先出（FIFO）**挑選「烘焙日 ≤ 銷貨日、還有庫存」的最早 `roasted_lots`，一筆明細可跨多批；每扣一批寫一筆 `inventory_movements`（銷貨出庫，−kg）
 3. 記錄 `cost_amount`／`unit_cost` 供毛利計算
 4. **熟豆不足**：存檔時先提醒，確認後仍可存檔。不足的量記在銷貨日前最近一個批次上（沒有的話記在最早的批次），該批次庫存變負數；該熟豆品項完全沒有烘焙批次時，這筆不扣庫存（明細顯示「未扣 x kg」）。補登烘焙批次後，重新存檔該銷貨單就會重新配批次
-5. **收款狀態**：現金／LINE Pay／刷卡 → 已收清；轉帳／貨到付款／月結 → 未收；可手動修改。Phase 3 才建立 `bank_transactions` 入帳與應收沖帳
+5. **收款狀態**（Phase 3 起）：一律由收款沖帳決定（未收／部分收款／已收清），不能手動指定，也不依付款方式自動判定；現金、LINE Pay、刷卡也要在銀行收支登錄入帳並沖帳。合計為 0 的單直接為已收清
 6. **單號** `S{YYYYMMDD}-{NN}`，留空自動產生，可手動輸入，不可重複
-7. **修改／刪除**：Phase 2 隨時可改（整張重寫明細與異動、FIFO 重算）；刪除時熟豆加回庫存。Phase 3 起已有收款紀錄的單會鎖定
+7. **修改／刪除**：隨時可改（整張重寫明細與異動、FIFO 重算），已有收款沖帳也可以改；改後合計小於已收金額 → 標示「溢收」（狀態仍為已收清）。刪除時熟豆加回庫存；**有收款沖帳的單不可刪除**，需先刪除沖帳
 8. 包材耗用（依配方扣包材）在 Phase 4
 
-### 8.4 收付款
-- 銀行入帳／出帳透過 `payment_allocations` 沖銷單據
-- 單據 `payment_status` 依已沖銷金額自動更新
+### 8.4 收付款（Phase 3 已實作）
+- 收款、付款一律在「銀行收支」手動登錄入帳／出帳，再選要沖銷的單據：入帳 → 銷貨單；出帳 → 進貨單或費用
+- 一筆收支可沖多張單、一張單可分多次沖；沖帳合計不可超過收支金額；單筆沖帳不可超過該單未沖餘額；可只沖一部分，之後再編輯補沖
+- 單據 `payment_status` 依已沖銷金額自動更新（收支新增、修改、刪除，以及單據修改時重算）
+- 進貨單有付款沖帳 → 鎖定（Phase 1 規則）；銷貨單、費用有沖帳仍可修改（溢收／溢付另外標示），但不可刪除
+- 帳戶互轉（例：現金存入銀行、LINE Pay 撥款）= 轉出帳戶一筆出帳＋轉入帳戶一筆入帳，修改／刪除兩筆一起；互轉不可沖帳
+- LINE Pay／刷卡撥款已扣手續費時：登錄撥款前的全額入帳並沖帳，再另記一筆「手續費」出帳
+- 交易日期不可早於帳戶期初日期；帳戶餘額可以是負數（不阻擋）
 
 ### 8.5 庫存預警
 - 生豆現有量 < `safety_stock_kg` → 補貨提醒
@@ -611,10 +634,10 @@ erDiagram
 | 庫存異動 | 日期、品項、異動類型 | 任一品項的進出明細 |
 | 庫存現況 | 截止日期 | 生豆／熟豆／包材數量與金額 |
 | 批號追溯 | 熟豆批次或生豆批號 | 生豆 → 烘焙 → 出貨給哪些客戶 |
-| 銀行收支 | 日期、帳戶、類別 | 入帳／出帳明細、期初期末餘額 |
-| 應收帳款 | 截止日期、客戶 | 帳齡分析（30／60／90 天） |
-| 應付帳款 | 截止日期、供應商 | 待付款清單 |
-| 費用分析 | 日期、類別 | 各類費用合計 |
+| 銀行收支 | 日期、帳戶、類別、沖帳狀況 | 入帳／出帳明細、期初期末餘額、逐筆餘額（Phase 3） |
+| 應收帳款 | 截止日期、客戶 | 帳齡分析（30／60／90 天）、逾期、信用額度（Phase 3） |
+| 應付帳款 | 截止日期、供應商、類型 | 進貨單＋費用待付清單、帳齡（Phase 3） |
+| 費用分析 | 日期、類別 | 各類費用合計、佔比、逐月（Phase 3） |
 | 毛利分析 | 日期、產品、客戶 | 營收 − 成本 = 毛利、毛利率 |
 | 損益概要 | 月／季／年 | 營收 − 銷貨成本 − 費用 = 淨利 |
 
@@ -753,3 +776,40 @@ API：
 | `/api/opening-stock/p{movement_id}` | GET／PUT／DELETE | 包材期初異動 |
 
 **既有資料庫升級**：`movement_type` 的 CHECK 新增「期初」，SQLite 不能直接改 CHECK，需重建 `inventory_movements`：先跑 `db/migrations/003_opening_stock.sql`（搬移資料、資料不變），再跑 `db/schema.sql` 重建 view。
+
+---
+
+## 14. Phase 3 實作決議
+
+開發 Phase 3 時與使用者確認的決議，以及因此對原規格的調整。
+
+| # | 項目 | 決議 |
+|---|---|---|
+| 1 | 收款方式 | **全部手動沖帳**：現金、LINE Pay、刷卡的銷貨單也不自動入帳，一律在銀行收支登錄入帳後沖銷。Phase 2「依付款方式自動判定收款狀態」取消 |
+| 2 | 費用付款 | **只記費用、不動帳戶**：費用存檔不產生出帳；付款時在銀行收支登錄出帳並沖銷費用。費用因此有付款狀態並列入應付帳款。原規格 `expenses.account_id` 拿掉 |
+| 3 | 攤入烘焙成本 | 費用的 `allocate_to_roast` 先只記標記（費用類別可設預設值），實際攤進熟豆成本留到 Phase 5 |
+| 4 | 已收款銷貨單 | 仍可修改；改後金額小於已收 → 標示「溢收」提醒。費用比照辦理（溢付）。進貨單維持 Phase 1 規則：有付款即鎖定 |
+| 5 | 帳戶互轉 | 新增「帳戶互轉」：一次產生出帳＋入帳兩筆，互相指向（`transfer_txn_id`） |
+| 6 | 收支編號 | `T{YYYYMMDD}-{NN}`，自動產生不可改；費用編號 `E{YYYYMMDD}-{NN}` 可改 |
+| 7 | 帳齡 | 從單據日起算，0–30／31–60／61–90／90 天以上；另標示已過應收／應付日。截止日只計截止日當天（含）之前的單據與收付款 |
+| 8 | 信用額度 | 應收帳款顯示客戶信用額度，超過時標示（不阻擋開單） |
+| 9 | 對帳、CSV 匯入 | `reconciled`、`bank_ref_no` 欄位先保留，功能在 Phase 5 |
+
+**既有資料庫升級**：先跑 `db/schema.sql` 建立 Phase 3 新表（並預建費用類別），再跑 `db/migrations/004_phase3.sql` 依沖帳重算銷貨單／進貨單的收付款狀態（Phase 2 依付款方式標成「已收清」的銷貨單會改回「未收」）。
+
+### API 一覽（Phase 3 新增）
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/bank-accounts`、`/api/expense-categories` | 同其他主檔 | 銀行帳戶、費用類別 |
+| `/api/bank-transactions` | GET（`?account_id=&from=&to=&category=&direction=&customer_id=&supplier_id=&alloc=open`）／POST | 收支查詢（指定帳戶時含期初、期末、逐筆餘額）、新增。POST：`{ account_id, txn_date, direction, amount, category, customer_id?, supplier_id?, counterparty?, description?, bank_ref_no?, allocations: [{ doc_type, doc_id, amount }] }`；帳戶互轉：`{ category: '轉帳', account_id, to_account_id, txn_date, amount, description? }` |
+| `/api/bank-transactions/{id}` | GET／PUT／DELETE | 讀取（含沖帳明細）、修改（沖帳整批重寫）、刪除（互轉兩筆一起） |
+| `/api/bank-transactions/open-docs` | GET（`?direction=&customer_id=&supplier_id=&exclude_txn_id=`） | 可沖銷的未結單據與未沖餘額 |
+| `/api/bank-transactions/balances` | GET（`?as_of=`） | 各帳戶餘額 |
+| `/api/expenses` | GET（`?from=&to=&category_id=&payment_status=&q=`）／POST | 費用查詢（含未付、攤入烘焙合計）、新增 |
+| `/api/expenses/{id}` | GET／PUT／DELETE | 讀取（含付款紀錄）、修改、刪除（有沖帳不可刪） |
+| `/api/finance/receivables` | GET（`?as_of=&customer_id=`） | 應收帳款帳齡 |
+| `/api/finance/payables` | GET（`?as_of=&supplier_id=&type=purchases｜expenses`） | 應付帳款帳齡（進貨＋費用） |
+| `/api/finance/expense-summary` | GET（`?from=&to=`） | 費用分析：類別合計、佔比、逐月 |
+
+銷貨單、進貨單的 GET 另回傳 `payments`（沖帳紀錄）、`paid_amount`、`unpaid_amount`；銷貨單另有 `overpaid`。

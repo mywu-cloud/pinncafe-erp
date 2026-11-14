@@ -9,6 +9,7 @@
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
+import { statusStatement, docPayments } from '../lib/payment.js';
 
 /** 驗證輸入並算出所有 auto 欄位 */
 async function prepare(db, body, { excludePurchaseId = null } = {}) {
@@ -172,6 +173,8 @@ async function getPurchase(db, id) {
   ).bind(id).all();
   header.items = items;
   header.locked = items.some((it) => (it.other_movement_count || 0) > 0);
+  Object.assign(header, await docPayments(db, 'purchases', id));
+  header.unpaid_amount = round(Math.max(0, header.total_amount - header.paid_amount));
   return header;
 }
 
@@ -226,15 +229,17 @@ export async function handlePurchases(id, request, env, user) {
     const { results } = await db.prepare(
       `SELECT p.*, s.name AS supplier_name,
               (SELECT COUNT(*) FROM purchase_items x WHERE x.purchase_id = p.purchase_id) AS item_count,
-              (SELECT COALESCE(SUM(x.qty), 0) FROM purchase_items x WHERE x.purchase_id = p.purchase_id AND x.item_type = '生豆') AS bean_kg
+              (SELECT COALESCE(SUM(x.qty), 0) FROM purchase_items x WHERE x.purchase_id = p.purchase_id AND x.item_type = '生豆') AS bean_kg,
+              COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = 'purchases' AND a.doc_id = p.purchase_id), 0) AS paid_amount
        FROM purchases p JOIN suppliers s ON s.supplier_id = p.supplier_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY p.purchase_date DESC, p.purchase_id DESC`,
     ).bind(...binds).all();
+    for (const r of results) { r.paid_amount = round(r.paid_amount); r.unpaid_amount = round(Math.max(0, r.total_amount - r.paid_amount)); }
     const summary = {
       count: results.length,
       total_amount: round(results.reduce((s, r) => s + r.total_amount, 0)),
-      unpaid_amount: round(results.filter((r) => r.payment_status !== '已付清').reduce((s, r) => s + r.total_amount, 0)),
+      unpaid_amount: round(results.reduce((s, r) => s + r.unpaid_amount, 0)),
       bean_kg: round(results.reduce((s, r) => s + r.bean_kg, 0), 3),
     };
     return json({ data: results, summary });
@@ -250,6 +255,7 @@ export async function handlePurchases(id, request, env, user) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, '未付', ?, ?, ?)`,
       ).bind(h.purchase_no, h.purchase_date, h.supplier_id, h.items_amount, h.shipping_fee, h.tax_amount, h.total_amount, h.invoice_no, h.due_date, h.note, user),
       ...itemStatements(db, p, user),
+      db.prepare(`UPDATE purchases SET payment_status = '已付清' WHERE purchase_no = ? AND total_amount <= 0.005`).bind(h.purchase_no),
     ]);
     const row = await db.prepare('SELECT purchase_id FROM purchases WHERE purchase_no = ?').bind(h.purchase_no).first();
     return json({ data: await getPurchase(db, row.purchase_id), unallocated: p.unallocated }, 201);
@@ -272,6 +278,7 @@ export async function handlePurchases(id, request, env, user) {
                 total_amount = ?, invoice_no = ?, due_date = ?, note = ?, updated_at = ? WHERE purchase_id = ?`,
       ).bind(h.purchase_no, h.purchase_date, h.supplier_id, h.items_amount, h.shipping_fee, h.tax_amount, h.total_amount, h.invoice_no, h.due_date, h.note, nowTW(), pid),
       ...itemStatements(db, p, user),
+      statusStatement(db, 'purchases', [pid]),
     ]);
     return json({ data: await getPurchase(db, pid), unallocated: p.unallocated });
   }

@@ -1,7 +1,11 @@
 -- =============================================================
--- 範例資料（Phase 1＋2，僅供開發測試）
+-- 範例資料（Phase 1～3，僅供開發測試）
 -- 執行前請先跑 schema.sql；重跑會先清空所有資料表
 -- =============================================================
+DELETE FROM payment_allocations;
+DELETE FROM bank_transactions;
+DELETE FROM bank_accounts;
+DELETE FROM expenses;
 DELETE FROM inventory_movements;
 DELETE FROM sale_items;
 DELETE FROM sales;
@@ -158,9 +162,39 @@ INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement
  ('2026-10-31 00:00:00', '生豆', 5, '期初', 8,   520, 4160, 'opening', NULL, NULL, 'L20261031-01', 'seed'),
  ('2026-10-31 00:00:00', '包材', 3, '期初', 300, 0.8, 240,  'opening', NULL, NULL, '開帳前剩餘', 'seed');
 
+-- =============================================================
+-- Phase 3：銀行帳戶、收支、沖帳、費用（費用類別由 schema.sql 預建）
+-- =============================================================
+INSERT INTO bank_accounts (account_id, account_name, account_type, bank_name, account_no_masked, opening_balance, opening_date, note) VALUES
+ (1, '台銀公司戶', '銀行', '臺灣銀行', '5678', 120000, '2026-10-31', NULL),
+ (2, '門市現金',   '現金', NULL,       NULL,   5000,   '2026-10-31', '收銀機零用金'),
+ (3, 'LINE Pay',   'LINE Pay', NULL,   NULL,   0,      '2026-10-31', NULL);
+
+INSERT INTO expenses (expense_id, expense_no, expense_date, category_id, amount, vendor, invoice_no, allocate_to_roast, payment_status, due_date, note, created_by) VALUES
+ (1, 'E20261105-01', '2026-11-05', (SELECT category_id FROM expense_categories WHERE name = '房租'), 15000, '房東 陳先生', NULL, 0, '已付清', NULL, '11 月房租', 'seed'),
+ (2, 'E20261110-01', '2026-11-10', (SELECT category_id FROM expense_categories WHERE name = '瓦斯'), 1800, '欣高瓦斯', 'GH11223344', 1, '未付', '2026-11-30', '烘豆機瓦斯', 'seed'),
+ (3, 'E20261112-01', '2026-11-12', (SELECT category_id FROM expense_categories WHERE name = '電費'), 2350, '台電', NULL, 1, '未付', '2026-11-25', NULL, 'seed');
+
+-- T20261105-01 房租轉帳；T20261111-01 王小明現金；T20261112-01/02 進貨部分付款＋手續費；T20261113-01/02 現金存入銀行（互轉）
+INSERT INTO bank_transactions (txn_id, txn_no, account_id, txn_date, direction, amount, category, customer_id, supplier_id, counterparty, description, transfer_txn_id, created_by) VALUES
+ (1, 'T20261105-01', 1, '2026-11-05', '出帳', 15000, '費用',     NULL, NULL, '房東 陳先生', '11 月房租', NULL, 'seed'),
+ (2, 'T20261111-01', 2, '2026-11-11', '入帳', 1040,  '銷貨收款', 1,    NULL, '王小明', NULL, NULL, 'seed'),
+ (3, 'T20261112-01', 1, '2026-11-12', '出帳', 20000, '進貨付款', NULL, 1,    '生豆研究所貿易有限公司', 'P20261102-01 先付部分', NULL, 'seed'),
+ (4, 'T20261112-02', 1, '2026-11-12', '出帳', 15,    '手續費',   NULL, NULL, '臺灣銀行', '跨行匯款手續費', NULL, 'seed'),
+ (5, 'T20261113-01', 2, '2026-11-13', '出帳', 3000,  '轉帳',     NULL, NULL, '台銀公司戶', '現金存入銀行', 6, 'seed'),
+ (6, 'T20261113-02', 1, '2026-11-13', '入帳', 3000,  '轉帳',     NULL, NULL, '門市現金', '現金存入銀行', 5, 'seed');
+
+INSERT INTO payment_allocations (txn_id, doc_type, doc_id, amount) VALUES
+ (1, 'expenses', 1, 15000),
+ (2, 'sales', 1, 1040),
+ (3, 'purchases', 1, 20000);
+UPDATE purchases SET payment_status = '部分付款' WHERE purchase_id = 1;
+
 -- ---------- 流水號 ----------
 INSERT INTO doc_sequences (prefix, ymd, last_no) VALUES
  ('P', '20261102', 1), ('P', '20261108', 1), ('P', '20261112', 1),
  ('L', '20261031', 1), ('L', '20261102', 2), ('L', '20261108', 2),
  ('R', '20261109', 1), ('R', '20261110', 1),
- ('S', '20261111', 1), ('S', '20261113', 1);
+ ('S', '20261111', 1), ('S', '20261113', 1),
+ ('E', '20261105', 1), ('E', '20261110', 1), ('E', '20261112', 1),
+ ('T', '20261105', 1), ('T', '20261111', 1), ('T', '20261112', 2), ('T', '20261113', 2);

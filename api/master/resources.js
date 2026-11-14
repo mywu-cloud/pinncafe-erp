@@ -20,6 +20,7 @@ export const resources = {
       ['purchases', 'supplier_id', '進貨單'],
       ['green_beans', 'default_supplier_id', '生豆品項'],
       ['packaging_items', 'supplier_id', '包材'],
+      ['bank_transactions', 'supplier_id', '銀行收支'],
     ],
   },
   customers: {
@@ -35,7 +36,7 @@ export const resources = {
       birthday: { type: 'date' }, source: { type: 'text' }, note: { type: 'text' },
       is_active: { type: 'bool', default: 1 },
     },
-    refs: [['sales', 'customer_id', '銷貨單']],
+    refs: [['sales', 'customer_id', '銷貨單'], ['bank_transactions', 'customer_id', '銀行收支']],
   },
   'green-beans': {
     table: 'green_beans', pk: 'bean_id', label: '生豆品項',
@@ -115,6 +116,38 @@ export const resources = {
       ['products', 'roasted_bean_id', '產品'],
       ['roast_batches', 'roasted_bean_id', '烘焙批次'],
     ],
+  },
+  'bank-accounts': {
+    table: 'bank_accounts', pk: 'account_id', label: '銀行帳戶',
+    search: ['account_name', 'bank_name', 'account_no_masked'],
+    fields: {
+      account_name: { type: 'text', required: true },
+      account_type: { type: 'enum', values: ['銀行', '現金', 'LINE Pay', '信用卡收單', '電商平台'], default: '銀行' },
+      bank_name: { type: 'text' },
+      account_no_masked: { type: 'text' },
+      opening_balance: { type: 'number', default: 0 },
+      opening_date: { type: 'date' },
+      note: { type: 'text' },
+      is_active: { type: 'bool', default: 1 },
+    },
+    // 只存帳號末四碼，避免完整帳號留在系統裡
+    validate(row) {
+      if (row.account_no_masked && !/^\d{1,4}$/.test(row.account_no_masked)) return '帳號只填末四碼（最多 4 位數字），不要存完整帳號';
+      if (row.opening_balance < 0) return '期初餘額不可為負數';
+      return null;
+    },
+    refs: [['bank_transactions', 'account_id', '銀行收支']],
+  },
+  'expense-categories': {
+    table: 'expense_categories', pk: 'category_id', label: '費用類別',
+    search: ['name'],
+    fields: {
+      name: { type: 'text', required: true },
+      allocate_to_roast: { type: 'bool', default: 0 },
+      note: { type: 'text' },
+      is_active: { type: 'bool', default: 1 },
+    },
+    refs: [['expenses', 'category_id', '費用']],
   },
 };
 

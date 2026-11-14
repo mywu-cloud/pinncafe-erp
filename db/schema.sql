@@ -6,6 +6,8 @@
 --          既有資料庫升級請先跑 db/migrations/002_phase2.sql 再跑本檔
 -- 期初庫存：生豆／包材開帳庫存（movement_type = '期初'）
 --          既有資料庫升級請先跑 db/migrations/003_opening_stock.sql 再跑本檔
+-- Phase 3：銀行帳戶、銀行收支、收付款沖帳、費用類別、費用支出
+--          既有資料庫升級：跑本檔後再跑 db/migrations/004_phase3.sql（重算收付款狀態）
 -- 規格：ARCHITECTURE.md
 --
 -- 慣例
@@ -266,7 +268,7 @@ CREATE INDEX IF NOT EXISTS idx_mv_ref  ON inventory_movements(ref_doc_type, ref_
 -- 單號流水號
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS doc_sequences (
-  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號、'R' 烘焙批次、'S' 銷貨單
+  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號、'R' 烘焙批次、'S' 銷貨單、'T' 銀行收支、'E' 費用
   ymd     TEXT NOT NULL,     -- 'YYYYMMDD'
   last_no INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (prefix, ymd)
@@ -383,6 +385,112 @@ CREATE TABLE IF NOT EXISTS sale_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_items_line ON sale_items(sale_id, line_no);
 CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
+
+-- =============================================================
+-- Phase 3：財務
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- 2.8 銀行帳戶（現金、LINE Pay、刷卡收單也各建一個帳戶）
+--   帳戶餘額 = opening_balance + Σ入帳 − Σ出帳（txn_date 不可早於 opening_date）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  account_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_name      TEXT    NOT NULL,
+  account_type      TEXT    NOT NULL DEFAULT '銀行'
+                    CHECK (account_type IN ('銀行','現金','LINE Pay','信用卡收單','電商平台')),
+  bank_name         TEXT,
+  account_no_masked TEXT,                             -- 帳號末四碼（不存完整帳號）
+  opening_balance   REAL    NOT NULL DEFAULT 0,
+  opening_date      TEXT,
+  note              TEXT,
+  is_active         INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  created_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
+-- -------------------------------------------------------------
+-- 5.1 銀行收支
+--   txn_no：自動產生 T{YYYYMMDD}-{NN}
+--   帳戶互轉：一筆出帳＋一筆入帳，transfer_txn_id 互相指向
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bank_transactions (
+  txn_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  txn_no          TEXT    NOT NULL UNIQUE,
+  account_id      INTEGER NOT NULL REFERENCES bank_accounts(account_id),
+  txn_date        TEXT    NOT NULL,
+  direction       TEXT    NOT NULL CHECK (direction IN ('入帳','出帳')),
+  amount          REAL    NOT NULL CHECK (amount > 0),
+  category        TEXT    NOT NULL CHECK (category IN ('銷貨收款','進貨付款','費用','轉帳','手續費','利息','其他')),
+  customer_id     INTEGER REFERENCES customers(customer_id),
+  supplier_id     INTEGER REFERENCES suppliers(supplier_id),
+  counterparty    TEXT,
+  description     TEXT,
+  transfer_txn_id INTEGER,                            -- 帳戶互轉的另一筆
+  reconciled      INTEGER NOT NULL DEFAULT 0 CHECK (reconciled IN (0,1)),   -- Phase 5 對帳
+  bank_ref_no     TEXT,
+  created_by      TEXT,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_bank_txn_account ON bank_transactions(account_id, txn_date);
+CREATE INDEX IF NOT EXISTS idx_bank_txn_date    ON bank_transactions(txn_date);
+
+-- -------------------------------------------------------------
+-- 5.3 費用類別
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS expense_categories (
+  category_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  name              TEXT    NOT NULL UNIQUE,
+  allocate_to_roast INTEGER NOT NULL DEFAULT 0 CHECK (allocate_to_roast IN (0,1)),  -- 新增費用時的預設值
+  note              TEXT,
+  is_active         INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  created_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+INSERT OR IGNORE INTO expense_categories (name, allocate_to_roast) VALUES
+ ('房租', 0), ('瓦斯', 1), ('電費', 1), ('水費', 0), ('運費', 0), ('平台手續費', 0),
+ ('行銷', 0), ('設備維修', 0), ('薪資', 0), ('雜支', 0);
+
+-- -------------------------------------------------------------
+-- 5.3 費用支出
+--   expense_no：自動產生 E{YYYYMMDD}-{NN}，存檔前可修改
+--   只記費用、不動帳戶；付款由銀行出帳沖帳（payment_allocations）
+--   allocate_to_roast：是否攤入烘焙成本（Phase 3 只記標記，Phase 5 攤提）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS expenses (
+  expense_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  expense_no        TEXT    NOT NULL UNIQUE,
+  expense_date      TEXT    NOT NULL,
+  category_id       INTEGER NOT NULL REFERENCES expense_categories(category_id),
+  amount            REAL    NOT NULL CHECK (amount > 0),
+  vendor            TEXT,
+  invoice_no        TEXT,
+  allocate_to_roast INTEGER NOT NULL DEFAULT 0 CHECK (allocate_to_roast IN (0,1)),
+  payment_status    TEXT    NOT NULL DEFAULT '未付' CHECK (payment_status IN ('未付','部分付款','已付清')),
+  due_date          TEXT,
+  note              TEXT,
+  created_by        TEXT,
+  created_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_expenses_date     ON expenses(expense_date);
+CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category_id);
+
+-- -------------------------------------------------------------
+-- 5.2 收付款沖帳
+--   入帳 → 沖銷售單（sales）；出帳 → 沖進貨單（purchases）或費用（expenses）
+--   單據 payment_status 依已沖銷金額自動更新
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS payment_allocations (
+  allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  txn_id        INTEGER NOT NULL REFERENCES bank_transactions(txn_id) ON DELETE CASCADE,
+  doc_type      TEXT    NOT NULL CHECK (doc_type IN ('sales','purchases','expenses')),
+  doc_id        INTEGER NOT NULL,
+  amount        REAL    NOT NULL CHECK (amount > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_alloc_txn ON payment_allocations(txn_id);
+CREATE INDEX IF NOT EXISTS idx_alloc_doc ON payment_allocations(doc_type, doc_id);
 
 -- =============================================================
 -- VIEWS

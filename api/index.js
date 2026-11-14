@@ -8,6 +8,9 @@ import { handleSales } from './transaction/sales.js';
 import { handleRoasts } from './inventory/roasts.js';
 import { handleOpening } from './inventory/opening.js';
 import { handleInventory } from './inventory/stock.js';
+import { handleBank } from './finance/bank.js';
+import { handleExpenses } from './finance/expenses.js';
+import { handleFinance } from './finance/reports.js';
 
 export async function handleApi(request, env) {
   try {
@@ -23,6 +26,9 @@ export async function handleApi(request, env) {
     if (resource === 'sales') return await handleSales(id, request, env, user);
     if (resource === 'roast-batches') return await handleRoasts(id, request, env, user);
     if (resource === 'opening-stock') return await handleOpening(id, request, env, user);
+    if (resource === 'bank-transactions') return await handleBank(id, request, env, user);
+    if (resource === 'expenses') return await handleExpenses(id, request, env, user);
+    if (resource === 'finance') return await handleFinance(id, request, env);
     if (resource === 'inventory') return await handleInventory(id, request, env);
     throw new HttpError(404, '找不到此路徑');
   } catch (err) {
