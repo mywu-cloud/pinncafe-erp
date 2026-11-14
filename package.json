@@ -1,0 +1,15 @@
+{
+  "name": "pinncafe-erp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:local": "wrangler d1 execute pinncafe-erp --local --file=db/schema.sql && wrangler d1 execute pinncafe-erp --local --file=db/seed.sql",
+    "db:remote:schema": "wrangler d1 execute pinncafe-erp --remote --file=db/schema.sql",
+    "db:remote:seed": "wrangler d1 execute pinncafe-erp --remote --file=db/seed.sql",
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.17"
+  }
+}

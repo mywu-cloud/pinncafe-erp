@@ -51,14 +51,17 @@
 └──────────────────────────────────────────────┘
 ```
 
-### 建議技術選型
+### 技術選型（已定案）
 
 | 層級 | 選項 |
 |---|---|
-| 前端 | HTML + JavaScript（或 React），部署於 Cloudflare Pages |
-| 後端 | Cloudflare Workers 或 Supabase（內建 Auth 與 Row Level Security） |
-| 資料庫 | PostgreSQL（Supabase）或 Cloudflare D1（SQLite） |
-| 匯出 | Excel（xlsx）、CSV |
+| 前端 | HTML + JavaScript（無建置步驟），部署於 Cloudflare Pages |
+| 後端 | Cloudflare Pages Functions（Workers） |
+| 資料庫 | Cloudflare D1（SQLite） |
+| 登入 | Cloudflare Access（Zero Trust） |
+| 匯出 | Excel（xlsx）、CSV（Phase 5） |
+
+介面為繁體中文；顏色慣例：**紅色 = 增加／入庫／入帳，綠色 = 減少／出庫／出帳**。金額一律新台幣。
 
 ---
 
@@ -89,35 +92,59 @@
 
 ---
 
-## 六、專案目錄建議
+## 六、專案目錄
 
 ```
-coffee-erp/
+pinncafe-erp/
 ├── README.md
 ├── ARCHITECTURE.md
+├── wrangler.toml               # Pages 設定、D1 綁定（binding = DB）
 ├── db/
-│   ├── schema.sql          # 建表語法
-│   └── seed.sql            # 範例資料
+│   ├── schema.sql              # 建表語法
+│   └── seed.sql                # 範例資料
+├── functions/api/[[path]].js   # Pages Function 進入點 → api/index.js
 ├── api/
-│   ├── master/             # 主檔 API
-│   ├── transaction/        # 進貨、銷貨、退貨
-│   ├── inventory/          # 庫存、烘焙、盤點
-│   ├── finance/            # 銀行、費用、對帳
-│   └── report/             # 報表查詢
+│   ├── index.js                # 路由
+│   ├── lib/                    # 共用工具、Cloudflare Access 驗證
+│   ├── master/                 # 主檔 API
+│   ├── transaction/            # 進貨（之後：銷貨、退貨）
+│   └── inventory/              # 庫存查詢（之後：烘焙、盤點）
 └── web/
-    ├── admin/              # 後台管理
-    ├── pos/                # 手機銷貨
-    └── dashboard/          # 報表儀表板
+    └── admin/                  # 後台管理（之後：pos/、dashboard/）
 ```
 
 ---
 
 ## 七、開發階段
 
-| 階段 | 內容 |
-|---|---|
-| Phase 1 | 主檔（供應商、客戶、生豆品項、產品）＋ 進貨 ＋ 生豆庫存 |
-| Phase 2 | 烘焙批次 ＋ 熟豆庫存 ＋ 銷貨 ＋ 日期區間查詢 |
-| Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 應收應付 ＋ 費用 |
-| Phase 4 | 包材、配方、訂閱、退貨、盤點、發票 |
-| Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 |
+| 階段 | 內容 | 狀態 |
+|---|---|---|
+| Phase 1 | 主檔（供應商、客戶＋喜好、生豆品項、包材、產品）＋ 進貨 ＋ 生豆／包材庫存 | ✅ 完成 |
+| Phase 2 | 烘焙批次 ＋ 熟豆庫存 ＋ 銷貨 ＋ 日期區間查詢 | |
+| Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 應收應付 ＋ 費用 | |
+| Phase 4 | 配方、包裝耗用、訂閱、退貨、盤點、發票 | |
+| Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 | |
+
+---
+
+## 八、安裝與部署
+
+### 本機開發
+
+```bash
+npm install
+npm run db:local      # 建立本機 D1 並匯入 schema.sql + seed.sql
+npm run dev           # http://localhost:8788/admin/
+```
+
+本機未設定 Cloudflare Access 變數時為開發模式，操作者記為 `dev@local`。
+
+### 部署到 Cloudflare
+
+1. 建立 D1：`npx wrangler d1 create pinncafe-erp`，把回傳的 `database_id` 填入 `wrangler.toml`
+2. 建表：`npm run db:remote:schema`（要範例資料再跑 `npm run db:remote:seed`，**會清空 Phase 1 資料表**）
+3. 部署：`npm run deploy`，或在 Cloudflare Pages 連結此 GitHub repo（Build output directory 填 `web`，不需 build command）
+4. 在 Zero Trust 為網站建立 Access Application，限定可登入的 email
+5. 在 Pages 專案的環境變數設定 `CF_ACCESS_TEAM_DOMAIN`（`<team>.cloudflareaccess.com`）與 `CF_ACCESS_AUD`（Application 的 AUD Tag）
+
+> ⚠️ 兩個 `CF_ACCESS_*` 變數沒設定時 API **不驗證登入**。正式環境務必設定。
