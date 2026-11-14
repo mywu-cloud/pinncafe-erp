@@ -3,7 +3,7 @@
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
 >
-> **實作狀態**：Phase 1 已完成（建表語法見 `db/schema.sql`）。Phase 1 的實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)，各表欄位也已同步更新。
+> **實作狀態**：Phase 1、Phase 2 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2），各表欄位也已同步更新。
 > 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
@@ -21,6 +21,7 @@
 9. [日期區間查詢與報表](#9-日期區間查詢與報表)
 10. [原規劃檢查結果](#10-原規劃檢查結果)
 11. [Phase 1 實作決議](#11-phase-1-實作決議)
+12. [Phase 2 實作決議](#12-phase-2-實作決議)
 
 ---
 
@@ -33,20 +34,21 @@
 | | 客戶喜好 customer_preferences | 原規劃 |
 | | 產品 products | 原規劃 |
 | | 生豆品項 green_beans | **新增** |
+| | 熟豆品項 roasted_beans | **新增**（Phase 2：烘焙產出的熟豆，產品指定使用哪個熟豆） |
 | | 配方 product_recipes | **新增** |
 | | 包材 packaging_items | **新增**（主檔與進貨已提前至 Phase 1） |
 | | 銀行帳戶 bank_accounts | **新增** |
-| 交易 | 進貨 purchases / purchase_items | 原規劃 |
-| | 銷貨 sales / sale_items | 原規劃 |
+| 交易 | 進貨 purchases / purchase_items | 原規劃（Phase 1 完成） |
+| | 銷貨 sales / sale_items | 原規劃（Phase 2 完成） |
 | | 退貨／折讓 returns / return_items | **新增** |
 | | 訂閱訂單 subscriptions | **新增** |
 | | 發票 invoices | **新增** |
 | 庫存與生產 | 生豆庫存 green_bean_lots | 原規劃（改為批號制） |
-| | 烘焙批次 roast_batches / roast_batch_inputs | **新增** |
-| | 熟豆庫存 roasted_lots | **新增** |
+| | 烘焙批次 roast_batches / roast_batch_inputs | **新增**（Phase 2 完成） |
+| | 熟豆庫存 roasted_lots | **新增**（Phase 2 完成） |
 | | 庫存異動 inventory_movements | **新增** |
 | | 盤點 stock_counts / stock_count_items | **新增** |
-| | 單號流水號 doc_sequences | **新增**（Phase 1） |
+| | 單號流水號 doc_sequences | **新增**（Phase 1；Phase 2 加入 R、S） |
 | 財務 | 銀行收支 bank_transactions | 原規劃 |
 | | 收付款沖帳 payment_allocations | **新增** |
 | | 費用支出 expenses | **新增** |
@@ -138,13 +140,16 @@
 | name | text | 產品名稱 |
 | category | enum | 單品豆／綜合豆／濾掛／禮盒／器具／其他 |
 | roast_level | enum | 烘焙度 |
-| net_weight_g | int | 每包淨重（g） |
+| roasted_bean_id | FK → roasted_beans | **使用哪個熟豆品項**（Phase 2）。空白 = 銷貨時不扣熟豆（器具、禮盒） |
+| net_weight_g | int | 每包淨重（g）。有指定熟豆品項時必填，銷貨扣熟豆 kg = 數量 × 淨重 ÷ 1000 |
 | retail_price | decimal | 零售價 |
 | wholesale_price | decimal | 批發價 |
-| shelf_life_days | int | 賞味期（天，從烘焙日起算） |
+| shelf_life_days | int | 賞味期（天，從烘焙日起算；僅供產品標示參考，熟豆批次的賞味期限以熟豆品項為準） |
 | note | text | 備註 |
 | is_active | bool | |
 | created_at / updated_at | datetime | |
+
+> 同一鍋熟豆可包成不同規格：「招牌綜合 250g」與「招牌綜合 1kg」是兩個產品，但指向同一個熟豆品項、共用同一份熟豆庫存。
 
 ### 2.6 配方 `product_recipes`（產品 BOM）
 
@@ -186,6 +191,21 @@
 | opening_balance | decimal | 期初餘額 |
 | opening_date | date | 期初日期 |
 | is_active | bool | |
+
+### 2.9 熟豆品項 `roasted_beans`（Phase 2 新增）
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| roasted_bean_id | PK | |
+| name | text | 名稱（例：招牌綜合 中深焙、耶加雪菲 水洗 淺焙） |
+| roast_level | enum | 淺焙／中焙／中深焙／深焙 |
+| shelf_life_days | int | 賞味期（天，烘焙日起算）→ 熟豆批次的 `best_before` |
+| safety_stock_kg | decimal | 安全庫存量 |
+| note | text | |
+| is_active | bool | |
+| created_at / updated_at | datetime | |
+
+> 烘焙批次產出的是「熟豆品項」，不是產品；產品透過 `products.roasted_bean_id` 指定使用哪個熟豆品項。
 
 ---
 
@@ -230,24 +250,28 @@
 
 > 生豆批號 `lot_no` 不存在明細表，存檔時寫入 `green_bean_lots`（以 `purchase_item_id` 一對一對應）。
 
-### 3.3 銷貨 `sales`（表頭）
+### 3.3 銷貨 `sales`（表頭；Phase 2 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| sale_id | PK | 銷貨單號 |
+| sale_id | PK | 內部流水編號（整數） |
+| sale_no | text UNIQUE | 銷貨單號。自動產生 `S{YYYYMMDD}-{NN}`，存檔前可手動修改 |
 | sale_date | date **IDX** | 銷貨日期 |
 | customer_id | FK → customers **IDX** | 散客可為空 |
 | channel | enum | 門市／電話／LINE／官網／蝦皮／批發 |
-| subtotal | decimal `auto` | |
-| discount | decimal | 折扣 |
-| shipping_fee | decimal | 運費 |
-| total_amount | decimal `auto` | |
-| payment_method | enum | 現金／轉帳／LINE Pay／刷卡／貨到付款 |
-| payment_status | enum `auto` | 未收／部分收款／已收清 |
+| subtotal | decimal `auto` | 明細小計合計 |
+| discount | decimal | 折扣（不可大於小計） |
+| shipping_fee | decimal | 向客戶收的運費 |
+| total_amount | decimal `auto` | 合計 = 小計 − 折扣 + 運費 |
+| cost_amount | decimal `auto` | 明細成本合計（出貨當下的熟豆成本） |
+| payment_method | enum | 現金／轉帳／LINE Pay／刷卡／貨到付款／月結 |
+| payment_status | enum | 未收／部分收款／已收清。Phase 2：依付款方式自動判定、可手動改；Phase 3 沖帳後自動更新 |
 | due_date | date | 應收日期（月結） |
-| invoice_id | FK → invoices | |
-| subscription_id | FK → subscriptions | 訂閱產生的訂單 |
 | note | text | |
+| created_by | text | 操作者 email |
+| created_at / updated_at | datetime | |
+
+> 毛利 = 小計 − 折扣 − 成本（不含運費）。`invoice_id`、`subscription_id` 於 Phase 4 加入。
 
 ### 3.4 銷貨明細 `sale_items`
 
@@ -255,13 +279,18 @@
 |---|---|---|
 | item_id | PK | |
 | sale_id | FK → sales | |
+| line_no | int | 明細行號 |
 | product_id | FK → products | |
-| roasted_lot_id | FK → roasted_lots | 出貨熟豆批次（追溯用） |
-| grind_size | enum | 研磨度 |
-| qty | int | 數量 |
+| grind_size | enum | 研磨度（原豆／手沖／義式／法壓／冷萃） |
+| qty | int | 數量（包） |
 | unit_price | decimal | 單價 |
-| unit_cost | decimal `auto` | 出貨當下成本（算毛利用） |
-| amount | decimal `auto` | 小計 |
+| amount | decimal `auto` | 小計 = 數量 × 單價 |
+| deduct_kg | decimal `auto` | 應扣熟豆 kg = 數量 × 產品每包淨重 ÷ 1000（產品未指定熟豆品項 → 0） |
+| cost_amount | decimal `auto` | 本筆成本 = Σ（扣的各批 kg × 該批每 kg 成本） |
+| unit_cost | decimal `auto` | 每包成本 = cost_amount ÷ qty（算毛利用） |
+| note | text | |
+
+> 一筆明細可能跨多個熟豆批次，所以**出貨批次不存在明細欄位**（原規格的 `roasted_lot_id`），改由 `inventory_movements`（`ref_doc_type = 'sales'`、`ref_item_id = item_id`、`item_ref_id = roasted_lot_id`）記錄與追溯。
 
 > **客戶購買紀錄** = `sales JOIN sale_items WHERE customer_id = ?`，不另建表。
 
@@ -327,18 +356,22 @@
 
 > `current_kg`（現有重量）與 `status`（使用中／已用完）**不存欄位**，由 view `v_green_bean_lot_stock` 依 `inventory_movements` 加總即時算出；view 另提供 `other_movement_count`（進貨入庫以外的異動筆數，> 0 代表批號已被使用）。
 
-### 4.2 烘焙批次 `roast_batches`（簡化版）
+### 4.2 烘焙批次 `roast_batches`（簡化版；Phase 2 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| batch_id | PK | 批次編號（例：R20261114-01） |
+| batch_id | PK | 內部流水編號（整數） |
+| batch_no | text UNIQUE | 批次編號。自動產生 `R{YYYYMMDD}-{NN}`（例：R20261114-01），存檔前可手動修改；同時也是熟豆批號 |
 | roast_date | date **IDX** | 烘焙日期（熟豆賞味期起算日） |
-| product_id | FK → products | 產出產品 |
+| roasted_bean_id | FK → roasted_beans **IDX** | 產出的熟豆品項（原規格為 product_id，見第 12 節） |
 | input_total_kg | decimal `auto` | 投入總重（明細加總） |
 | output_kg | decimal | **產出熟豆 kg（手動輸入）** |
 | loss_rate | decimal `auto` | 失重率 =（投入 − 產出）÷ 投入 |
 | input_total_cost | decimal `auto` | 投入生豆總成本 |
 | unit_cost | decimal `auto` | 熟豆每 kg 成本 = 投入總成本 ÷ 產出 kg |
+| note | text | |
+| created_by | text | 操作者 email |
+| created_at / updated_at | datetime | |
 
 ### 4.3 烘焙投入明細 `roast_batch_inputs`
 
@@ -346,9 +379,11 @@
 |---|---|---|
 | input_id | PK | |
 | batch_id | FK → roast_batches | |
-| lot_id | FK → green_bean_lots | **投入哪一批生豆** |
+| line_no | int | 明細行號 |
+| lot_id | FK → green_bean_lots | **投入哪一批生豆**（同一批次內不重複） |
 | input_kg | decimal | **投入公斤數** |
 | unit_cost | decimal `auto` | 帶入該 Lot 成本 |
+| amount | decimal `auto` | 投入成本 = input_kg × unit_cost |
 
 > 一個烘焙批次可投入多個生豆批號（綜合豆，或同一支豆子湊不同進貨批次）。
 
@@ -357,13 +392,14 @@
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | roasted_lot_id | PK | |
-| batch_id | FK → roast_batches | 來源烘焙批次 |
-| product_id | FK → products | |
+| batch_id | FK → roast_batches（UNIQUE） | 來源烘焙批次（一對一，批號 = `batch_no`） |
+| roasted_bean_id | FK → roasted_beans | 熟豆品項 |
 | roast_date | date | 烘焙日 |
-| best_before | date `auto` | 賞味期限 = 烘焙日 + 產品賞味天數 |
+| best_before | date `auto` | 賞味期限 = 烘焙日 + 熟豆品項賞味天數（未設定則空白） |
 | initial_kg | decimal | 產出重量 |
-| current_kg | decimal `auto` | 現有重量 |
 | unit_cost | decimal | 每 kg 成本 |
+
+> `current_kg`（現有重量）**不存欄位**，由 view `v_roasted_lot_stock` 依 `inventory_movements` 加總；view 另提供 `other_movement_count`（烘焙產出以外的異動筆數，> 0 代表熟豆已被使用 → 烘焙批次鎖定）。熟豆批次可能出現負庫存（銷貨時熟豆不足仍存檔，見 8.3）。
 
 ### 4.5 庫存異動 `inventory_movements`（核心表）
 
@@ -385,13 +421,13 @@
 
 > 所有庫存數量皆由此表加總計算，**不直接修改庫存數字**。
 
-> 進貨入庫的 `movement_date` = 進貨日期 00:00:00。索引：`movement_date`、`(item_type, item_ref_id, movement_date)`、`(ref_doc_type, ref_doc_id)`。
+> 異動的 `movement_date` = 單據日期 00:00:00（進貨日期／烘焙日期／銷貨日期）。`ref_doc_type`：`purchases`／`roast_batches`／`sales`。索引：`movement_date`、`(item_type, item_ref_id, movement_date)`、`(ref_doc_type, ref_doc_id)`。
 
 ### 4.5.1 單號流水號 `doc_sequences`
 
 | 欄位 | 說明 |
 |---|---|
-| prefix + ymd | PK。prefix：`P` 進貨單、`L` 生豆批號；ymd：`YYYYMMDD` |
+| prefix + ymd | PK。prefix：`P` 進貨單、`L` 生豆批號、`R` 烘焙批次、`S` 銷貨單；ymd：`YYYYMMDD` |
 | last_no | 當日已用到的最大流水號（只增不減，刪單後號碼不重複使用） |
 
 ### 4.6 盤點 `stock_counts` / `stock_count_items`
@@ -479,7 +515,9 @@ erDiagram
   roast_batches ||--|{ roast_batch_inputs : "投入"
   green_bean_lots ||--o{ roast_batch_inputs : "被投入"
   roast_batches ||--|| roasted_lots : "產出"
-  products ||--o{ roast_batches : "產出產品"
+  roasted_beans ||--o{ roast_batches : "產出熟豆品項"
+  roasted_beans ||--o{ roasted_lots : "批次"
+  roasted_beans ||--o{ products : "包裝成產品"
 
   products ||--o{ product_recipes : "配方"
   packaging_items ||--o{ product_recipes : "包材"
@@ -489,7 +527,7 @@ erDiagram
   customers ||--o{ subscriptions : "訂閱"
   sales ||--|{ sale_items : "明細"
   products ||--o{ sale_items : "品項"
-  roasted_lots ||--o{ sale_items : "出貨批次"
+  roasted_lots ||--o{ inventory_movements : "銷貨出庫（ref = sale_items）"
   sales ||--o| invoices : "發票"
 
   bank_accounts ||--o{ bank_transactions : "收支"
@@ -518,9 +556,9 @@ erDiagram
 6. **修改／刪除**：進貨單內的生豆批號都還沒有其他異動（烘焙投入、樣品、盤點…）時可修改或刪除，修改時整張重寫明細、批號與異動；任一批號已被使用，或已有付款紀錄 → 整張單鎖定，只能檢視
 7. 表頭、明細、批號、異動在同一個 D1 batch（單一交易）內完成
 
-### 8.2 烘焙批次存檔
-1. 每筆投入明細 → `inventory_movements`（烘焙投入，−kg）扣生豆庫存
-2. 建立 `roasted_lots` → `inventory_movements`（烘焙產出，+kg）
+### 8.2 烘焙批次存檔（Phase 2 已實作）
+1. 每筆投入明細 → `inventory_movements`（烘焙投入，−kg）扣生豆批號庫存
+2. 建立 `roasted_lots` → `inventory_movements`（烘焙產出，+kg；金額 = 投入總成本）
 3. 自動計算：
    ```
    投入總重     = Σ roast_batch_inputs.input_kg
@@ -528,13 +566,21 @@ erDiagram
    投入總成本   = Σ (input_kg × lot.unit_cost)
    熟豆每kg成本 = 投入總成本 ÷ 產出熟豆 kg
    ```
-4. 檢核：生豆 Lot 庫存不足時禁止存檔；失重率 < 10% 或 > 25% 時提醒確認
+4. 檢核：生豆 Lot 庫存不足時禁止存檔；生豆批號入庫日晚於烘焙日、產出大於投入 → 禁止存檔；失重率 < 10% 或 > 25% 時存檔前跳出提醒，確認後可存
+5. **批次編號** `R{YYYYMMDD}-{NN}`（日期為烘焙日期），留空自動產生，可手動輸入，不可重複
+6. **修改／刪除**：熟豆批次還沒有其他異動（銷貨出庫…）時可修改或刪除（整批重寫明細、熟豆批次與異動，生豆加回庫存）；熟豆已被使用 → 鎖定，只能檢視
+7. 烘焙投入會讓來源進貨單鎖定（8.1 第 6 點）
+8. 表頭、明細、熟豆批次、異動在同一個 D1 batch 內完成
 
-### 8.3 銷貨存檔
-1. 依產品配方扣熟豆與包材（`inventory_movements` 銷貨出庫／包裝耗用）
-2. 熟豆以**先進先出（FIFO）**挑選最早烘焙的 `roasted_lots`
-3. 記錄 `unit_cost` 供毛利計算
-4. 現結 → 同時建立 `bank_transactions` 入帳；月結 → 產生應收帳款
+### 8.3 銷貨存檔（Phase 2 已實作熟豆部分）
+1. 產品有指定熟豆品項 → 應扣熟豆 kg = 數量 × 每包淨重 g ÷ 1000；沒指定（器具等）→ 不扣庫存、成本 0
+2. 熟豆以**先進先出（FIFO）**挑選「烘焙日 ≤ 銷貨日、還有庫存」的最早 `roasted_lots`，一筆明細可跨多批；每扣一批寫一筆 `inventory_movements`（銷貨出庫，−kg）
+3. 記錄 `cost_amount`／`unit_cost` 供毛利計算
+4. **熟豆不足**：存檔時先提醒，確認後仍可存檔。不足的量記在銷貨日前最近一個批次上（沒有的話記在最早的批次），該批次庫存變負數；該熟豆品項完全沒有烘焙批次時，這筆不扣庫存（明細顯示「未扣 x kg」）。補登烘焙批次後，重新存檔該銷貨單就會重新配批次
+5. **收款狀態**：現金／LINE Pay／刷卡 → 已收清；轉帳／貨到付款／月結 → 未收；可手動修改。Phase 3 才建立 `bank_transactions` 入帳與應收沖帳
+6. **單號** `S{YYYYMMDD}-{NN}`，留空自動產生，可手動輸入，不可重複
+7. **修改／刪除**：Phase 2 隨時可改（整張重寫明細與異動、FIFO 重算）；刪除時熟豆加回庫存。Phase 3 起已有收款紀錄的單會鎖定
+8. 包材耗用（依配方扣包材）在 Phase 4
 
 ### 8.4 收付款
 - 銀行入帳／出帳透過 `payment_allocations` 沖銷單據
@@ -632,3 +678,45 @@ erDiagram
 | `/api/inventory/packaging` | GET（`?from=&to=`） | 包材庫存 |
 | `/api/inventory/movements` | GET（`?item_type=&from=&to=&bean_id=&lot_id=&packaging_id=&movement_type=`） | 庫存異動明細 |
 | `/api/me` | GET | 目前登入者 |
+
+---
+
+## 12. Phase 2 實作決議
+
+開發 Phase 2 時與使用者確認的決議，以及因此對原規格的調整。
+
+| # | 項目 | 決議 |
+|---|---|---|
+| 1 | 烘焙批次對應 | 新增**熟豆品項主檔** `roasted_beans`。烘焙批次產出熟豆品項（原規格是對應單一產品）；產品以 `roasted_bean_id` ＋ `net_weight_g` 指定用哪個熟豆、每包幾克。250g 與 1kg 共用同一鍋熟豆庫存 |
+| 2 | 熟豆不足 | 銷貨時熟豆不夠扣 → **提醒後仍可存檔**，允許批次負庫存，補登烘焙後重存銷貨單可重新配批次（規則見 8.3） |
+| 3 | 收款狀態 | Phase 2 依付款方式自動判定（現金／LINE Pay／刷卡 = 已收清，其餘 = 未收），可手動改；付款方式新增「月結」。銀行入帳於 Phase 3 |
+| 4 | 出貨批次紀錄 | `sale_items` 不存 `roasted_lot_id`；一筆明細可跨批，批次由 `inventory_movements` 記錄 |
+| 5 | 熟豆批號 | 一個烘焙批次產出一個熟豆批次，批號直接用烘焙批次編號 `R{YYYYMMDD}-{NN}` |
+| 6 | 賞味期限 | `roasted_lots.best_before` = 烘焙日 + 熟豆品項 `shelf_life_days`；庫存查詢標示「7 天內到期／已過賞味期」 |
+| 7 | 毛利 | 銷貨查詢顯示毛利 = 小計 − 折扣 − 熟豆成本（不含運費、包材；完整成本報表在 Phase 5） |
+| 8 | 日期區間查詢 | Phase 2 提供：銷貨查詢、客戶購買紀錄、烘焙紀錄、熟豆庫存（期初／入／出／期末）與異動明細。失重率趨勢、批號追溯、Excel 匯出留待後續階段 |
+| 9 | 客戶喜好提示 | 開銷貨單選客戶時，顯示該客戶的喜好與付款條件；付款條件含「月結」的客戶自動帶入月結／未收 |
+| 10 | 單價帶入 | 選產品自動帶單價：價格等級為批發價的客戶帶批發價，其餘帶零售價，可修改 |
+
+其他實作細節：
+
+- **既有資料庫升級**：先跑 `db/migrations/002_phase2.sql`（`products` 加 `roasted_bean_id` 欄位），再跑 `db/schema.sql`（建立 Phase 2 新表與 view，`IF NOT EXISTS` 不影響既有資料）。
+- **修改單據時留空編號** = 沿用原編號（烘焙批次、銷貨單）。
+- **主檔刪除**：熟豆品項被產品或烘焙批次引用、產品被銷貨明細引用、客戶被銷貨單引用時不可刪除，改用停用。
+
+### API 一覽（Phase 2 新增）
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/roasted-beans`、`/api/roasted-beans/{id}` | 同其他主檔 | 熟豆品項主檔 |
+| `/api/roast-batches` | GET（`?from=&to=&roasted_bean_id=&bean_id=&lot_id=`）／POST | 烘焙紀錄查詢（含投入／產出合計、平均失重率）、新增 |
+| `/api/roast-batches/{id}` | GET／PUT／DELETE | 讀取（含 `locked`）、修改、刪除 |
+| `/api/roast-batches/next-no?date=` | GET | 預覽下一個批次編號 |
+| `/api/sales` | GET（`?from=&to=&customer_id=&product_id=&channel=&payment_status=`）／POST | 銷貨查詢（含營業額、成本、毛利、未收款）、新增。`customer_id=none` = 散客 |
+| `/api/sales/{id}` | GET／PUT／DELETE | 讀取（明細含出貨熟豆批次）、修改、刪除 |
+| `/api/sales/items` | GET（同銷貨查詢的篩選） | 銷貨明細查詢；帶 `customer_id` 即客戶購買紀錄（累計金額、最近購買日、常買品項） |
+| `/api/sales/next-no?date=` | GET | 預覽下一個銷貨單號 |
+| `/api/inventory/roasted` | GET（`?from=&to=&roasted_bean_id=&show_empty=1`） | 熟豆庫存：品項彙總＋批次 |
+| `/api/inventory/movements` | GET | 新增篩選 `roasted_bean_id`、`roasted_lot_id`；回傳 `doc_no`（進貨單／烘焙批次／銷貨單編號） |
+
+銷貨存檔時熟豆不足會回 `409`，`detail = { code: 'SHORTAGE', shortages: [...] }`；請求加上 `allow_shortage: true` 即可存檔。

@@ -4,12 +4,12 @@
 //   期末 = 期初 + 入庫 − 出庫（= 迄日當天結束時的庫存）
 // 未給起日 → 期初為 0（從最早紀錄算起）；未給迄日 → 算到目前為止。
 
-import { HttpError, json, toInt, dateRange, round } from '../lib/http.js';
+import { HttpError, json, toInt, dateRange, round, todayTW } from '../lib/http.js';
 
-/** 迄日的隔天（movement_date < 此值） */
-function dayAfter(d) {
+/** 迄日的隔天（movement_date < 此值）；days 可指定往後幾天 */
+function dayAfter(d, days = 1) {
   const t = new Date(d + 'T00:00:00Z');
-  t.setUTCDate(t.getUTCDate() + 1);
+  t.setUTCDate(t.getUTCDate() + days);
   return t.toISOString().slice(0, 10);
 }
 
@@ -97,6 +97,66 @@ async function greenBeans(db, url) {
 }
 
 // ------------------------------------------------------------------
+// GET /api/inventory/roasted?from=&to=&roasted_bean_id=&show_empty=1
+// 熟豆品項彙總，每個品項下展開熟豆批次（= 烘焙批次）
+// ------------------------------------------------------------------
+async function roasted(db, url) {
+  const { from, to } = dateRange(url);
+  const beanId = url.searchParams.get('roasted_bean_id');
+  const showEmpty = url.searchParams.get('show_empty') === '1';
+  const pc = periodCols(from);
+  const upper = to ? dayAfter(to) : '9999-12-31';
+  const asOf = to || todayTW();
+  const soon = dayAfter(asOf, 7); // 距賞味期限 ≤ 7 天 → 出清提醒
+
+  const { results: lots } = await db.prepare(
+    `SELECT rl.roasted_lot_id, rl.batch_id, rb.batch_no, rl.roasted_bean_id, rl.roast_date, rl.best_before,
+            rl.initial_kg, rl.unit_cost, rb.loss_rate, ${pc.sql}
+     FROM roasted_lots rl
+     JOIN roast_batches rb ON rb.batch_id = rl.batch_id
+     LEFT JOIN inventory_movements m
+            ON m.item_type = '熟豆' AND m.item_ref_id = rl.roasted_lot_id AND m.movement_date < ?
+     ${beanId ? 'WHERE rl.roasted_bean_id = ?' : ''}
+     GROUP BY rl.roasted_lot_id
+     ORDER BY rl.roast_date, rl.roasted_lot_id`,
+  ).bind(...pc.binds, upper, ...(beanId ? [toInt(beanId, '熟豆品項')] : [])).all();
+
+  const { results: beans } = await db.prepare(
+    `SELECT roasted_bean_id, name, roast_level, safety_stock_kg, is_active FROM roasted_beans
+     ${beanId ? 'WHERE roasted_bean_id = ?' : ''} ORDER BY is_active DESC, roasted_bean_id`,
+  ).bind(...(beanId ? [Number(beanId)] : [])).all();
+
+  const zero = () => Object.fromEntries([...QTY_KEYS, ...AMT_KEYS].map((k) => [k, 0]));
+  const byBean = new Map(beans.map((b) => [b.roasted_bean_id, { ...b, ...zero(), lots: [], expiring_count: 0 }]));
+  for (const lot of lots) {
+    tidy(lot);
+    const touched = lot.opening_qty || lot.in_qty || lot.out_qty || lot.closing_qty;
+    if (!touched) continue;
+    const b = byBean.get(lot.roasted_bean_id);
+    if (!b) continue;
+    lot.status = lot.closing_qty > 0.0005 ? '有庫存' : lot.closing_qty < -0.0005 ? '負庫存' : '已售完';
+    lot.expired = lot.closing_qty > 0.0005 && !!lot.best_before && lot.best_before < asOf;
+    lot.expiring = lot.closing_qty > 0.0005 && !!lot.best_before && !lot.expired && lot.best_before <= soon;
+    if (lot.expired || lot.expiring) b.expiring_count += 1;
+    b.lots.push(lot);
+    for (const k of [...QTY_KEYS, ...AMT_KEYS]) b[k] += lot[k];
+  }
+
+  const total = zero();
+  const data = [];
+  for (const b of byBean.values()) {
+    tidy(b);
+    b.avg_cost = b.closing_qty > 0 ? round(b.closing_amount / b.closing_qty, 2) : null;
+    b.low_stock = b.is_active === 1 && b.safety_stock_kg > 0 && b.closing_qty < b.safety_stock_kg;
+    b.negative = b.closing_qty < -0.0005 || b.lots.some((l) => l.status === '負庫存');
+    if (!showEmpty && b.lots.length === 0 && !b.low_stock) continue;
+    for (const k of [...QTY_KEYS, ...AMT_KEYS]) total[k] += b[k];
+    data.push(b);
+  }
+  return json({ from, to, as_of: asOf, data, total: tidy(total) });
+}
+
+// ------------------------------------------------------------------
 // GET /api/inventory/packaging?from=&to=
 // ------------------------------------------------------------------
 async function packaging(db, url) {
@@ -118,8 +178,8 @@ async function packaging(db, url) {
 }
 
 // ------------------------------------------------------------------
-// GET /api/inventory/movements?item_type=&from=&to=&bean_id=&lot_id=&packaging_id=&movement_type=
-// 異動明細（流水帳）
+// GET /api/inventory/movements?item_type=&from=&to=&bean_id=&lot_id=&roasted_bean_id=&roasted_lot_id=&packaging_id=&movement_type=
+// 異動明細（流水帳）。doc_no = 來源單據編號（進貨單／烘焙批次／銷貨單）
 // ------------------------------------------------------------------
 async function movements(db, url) {
   const { from, to } = dateRange(url);
@@ -135,19 +195,28 @@ async function movements(db, url) {
   if (to) { where.push('m.movement_date < ?'); binds.push(dayAfter(to)); }
   if (sp.get('lot_id')) { where.push("m.item_type = '生豆' AND m.item_ref_id = ?"); binds.push(toInt(sp.get('lot_id'), '批號')); }
   if (sp.get('bean_id')) { where.push("m.item_type = '生豆' AND l.bean_id = ?"); binds.push(toInt(sp.get('bean_id'), '生豆品項')); }
+  if (sp.get('roasted_lot_id')) { where.push("m.item_type = '熟豆' AND m.item_ref_id = ?"); binds.push(toInt(sp.get('roasted_lot_id'), '熟豆批次')); }
+  if (sp.get('roasted_bean_id')) { where.push("m.item_type = '熟豆' AND rl.roasted_bean_id = ?"); binds.push(toInt(sp.get('roasted_bean_id'), '熟豆品項')); }
   if (sp.get('packaging_id')) { where.push("m.item_type = '包材' AND m.item_ref_id = ?"); binds.push(toInt(sp.get('packaging_id'), '包材')); }
   if (sp.get('movement_type')) { where.push('m.movement_type = ?'); binds.push(sp.get('movement_type')); }
 
   const { results } = await db.prepare(
     `SELECT m.*, l.lot_no, b.name AS bean_name, k.name AS packaging_name, k.unit AS packaging_unit,
-            pu.purchase_no
+            rlb.batch_no AS roasted_lot_no, rn.name AS roasted_bean_name,
+            pu.purchase_no, COALESCE(pu.purchase_no, dr.batch_no, ds.sale_no) AS doc_no, dc.name AS customer_name
      FROM inventory_movements m
      LEFT JOIN green_bean_lots l ON m.item_type = '生豆' AND l.lot_id = m.item_ref_id
      LEFT JOIN green_beans b ON b.bean_id = l.bean_id
      LEFT JOIN packaging_items k ON m.item_type = '包材' AND k.packaging_id = m.item_ref_id
+     LEFT JOIN roasted_lots rl ON m.item_type = '熟豆' AND rl.roasted_lot_id = m.item_ref_id
+     LEFT JOIN roast_batches rlb ON rlb.batch_id = rl.batch_id
+     LEFT JOIN roasted_beans rn ON rn.roasted_bean_id = rl.roasted_bean_id
      LEFT JOIN purchases pu ON m.ref_doc_type = 'purchases' AND pu.purchase_id = m.ref_doc_id
+     LEFT JOIN roast_batches dr ON m.ref_doc_type = 'roast_batches' AND dr.batch_id = m.ref_doc_id
+     LEFT JOIN sales ds ON m.ref_doc_type = 'sales' AND ds.sale_id = m.ref_doc_id
+     LEFT JOIN customers dc ON dc.customer_id = ds.customer_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY m.movement_date, m.movement_id
+     ORDER BY m.movement_date, (m.qty < 0), m.movement_id
      LIMIT 2000`,
   ).bind(...binds).all();
   return json({ from, to, data: results });
@@ -157,6 +226,7 @@ export async function handleInventory(sub, request, env) {
   if (request.method !== 'GET') throw new HttpError(405, '不支援的操作');
   const url = new URL(request.url);
   if (sub === 'green-beans') return greenBeans(env.DB, url);
+  if (sub === 'roasted') return roasted(env.DB, url);
   if (sub === 'packaging') return packaging(env.DB, url);
   if (sub === 'movements') return movements(env.DB, url);
   throw new HttpError(404, '找不到此查詢');

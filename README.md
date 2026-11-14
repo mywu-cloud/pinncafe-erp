@@ -10,7 +10,7 @@
 
 | 模組 | 功能 |
 |---|---|
-| 主檔管理 | 供應商、客戶、客戶喜好、生豆品項、產品、配方（BOM）、包材、銀行帳戶 |
+| 主檔管理 | 供應商、客戶、客戶喜好、生豆品項、熟豆品項、產品、配方（BOM）、包材、銀行帳戶 |
 | 交易 | 進貨、銷貨、退貨／折讓、訂閱訂單、應收／應付、發票 |
 | 庫存與生產 | 生豆庫存（批號 Lot）、烘焙批次、熟豆庫存、包材庫存、盤點調整 |
 | 財務 | 銀行入帳／出帳、費用支出、銀行對帳、成本計算 |
@@ -90,6 +90,8 @@
 
 失重率超出 10%–25% 時系統提醒，避免輸入錯誤。
 
+烘焙產出的是「熟豆品項」（例：招牌綜合 中深焙）。產品主檔指定每個產品用哪個熟豆品項、每包幾克，所以 250g 與 1kg 兩種包裝共用同一鍋熟豆；銷貨時依「數量 × 每包淨重」以先進先出扣熟豆庫存。
+
 ---
 
 ## 六、專案目錄
@@ -100,15 +102,16 @@ pinncafe-erp/
 ├── ARCHITECTURE.md
 ├── wrangler.toml               # Pages 設定、D1 綁定（binding = DB）
 ├── db/
-│   ├── schema.sql              # 建表語法
+│   ├── schema.sql              # 建表語法（全新安裝）
+│   ├── migrations/             # 既有資料庫升級（002_phase2.sql）
 │   └── seed.sql                # 範例資料
 ├── functions/api/[[path]].js   # Pages Function 進入點 → api/index.js
 ├── api/
 │   ├── index.js                # 路由
 │   ├── lib/                    # 共用工具、Cloudflare Access 驗證
 │   ├── master/                 # 主檔 API
-│   ├── transaction/            # 進貨（之後：銷貨、退貨）
-│   └── inventory/              # 庫存查詢（之後：烘焙、盤點）
+│   ├── transaction/            # 進貨、銷貨（之後：退貨）
+│   └── inventory/              # 庫存查詢、烘焙批次（之後：盤點）
 └── web/
     └── admin/                  # 後台管理（之後：pos/、dashboard/）
 ```
@@ -120,7 +123,7 @@ pinncafe-erp/
 | 階段 | 內容 | 狀態 |
 |---|---|---|
 | Phase 1 | 主檔（供應商、客戶＋喜好、生豆品項、包材、產品）＋ 進貨 ＋ 生豆／包材庫存 | ✅ 完成 |
-| Phase 2 | 烘焙批次 ＋ 熟豆庫存 ＋ 銷貨 ＋ 日期區間查詢 | |
+| Phase 2 | 熟豆品項 ＋ 烘焙批次 ＋ 熟豆庫存 ＋ 銷貨 ＋ 客戶購買紀錄 ＋ 日期區間查詢 | ✅ 完成 |
 | Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 應收應付 ＋ 費用 | |
 | Phase 4 | 配方、包裝耗用、訂閱、退貨、盤點、發票 | |
 | Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 | |
@@ -137,14 +140,28 @@ npm run db:local      # 建立本機 D1 並匯入 schema.sql + seed.sql
 npm run dev           # http://localhost:8788/admin/
 ```
 
-本機未設定 Cloudflare Access 變數時為開發模式，操作者記為 `dev@local`。
+本機未設定 Cloudflare Access 變數時為開發模式，操作者記為 `dev@local`。`wrangler.toml` 已寫入正式環境的 Access 設定，本機開發請建立 `.dev.vars`（已在 .gitignore）把兩個變數設為空字串：
+
+```
+CF_ACCESS_AUD=""
+CF_ACCESS_TEAM_DOMAIN=""
+```
 
 ### 部署到 Cloudflare
 
 1. 建立 D1：`npx wrangler d1 create pinncafe-erp`，把回傳的 `database_id` 填入 `wrangler.toml`
-2. 建表：`npm run db:remote:schema`（要範例資料再跑 `npm run db:remote:seed`，**會清空 Phase 1 資料表**）
+2. 建表：`npm run db:remote:schema`（要範例資料再跑 `npm run db:remote:seed`，**會清空所有資料表**）
 3. 部署：`npm run deploy`，或在 Cloudflare Pages 連結此 GitHub repo（Build output directory 填 `web`，不需 build command）
 4. 在 Zero Trust 為網站建立 Access Application，限定可登入的 email
 5. 在 Pages 專案的環境變數設定 `CF_ACCESS_TEAM_DOMAIN`（`<team>.cloudflareaccess.com`）與 `CF_ACCESS_AUD`（Application 的 AUD Tag）
 
 > ⚠️ 兩個 `CF_ACCESS_*` 變數沒設定時 API **不驗證登入**。正式環境務必設定。
+
+### 既有資料庫升級到 Phase 2
+
+```bash
+npm run db:remote:migrate:phase2   # products 加 roasted_bean_id 欄位（只能跑一次）
+npm run db:remote:schema           # 建立 Phase 2 新表與 view，不影響既有資料
+```
+
+升級後請到「主檔 → 熟豆品項」建立熟豆品項，再到「產品」指定每個產品使用的熟豆品項與每包淨重。

@@ -35,7 +35,7 @@ export const resources = {
       birthday: { type: 'date' }, source: { type: 'text' }, note: { type: 'text' },
       is_active: { type: 'bool', default: 1 },
     },
-    refs: [],
+    refs: [['sales', 'customer_id', '銷貨單']],
   },
   'green-beans': {
     table: 'green_beans', pk: 'bean_id', label: '生豆品項',
@@ -85,10 +85,36 @@ export const resources = {
       net_weight_g: { type: 'int' },
       retail_price: { type: 'number' }, wholesale_price: { type: 'number' },
       shelf_life_days: { type: 'int' },
+      roasted_bean_id: { type: 'fk' },
       note: { type: 'text' },
       is_active: { type: 'bool', default: 1 },
     },
-    refs: [],
+    joins: 'LEFT JOIN roasted_beans rb ON rb.roasted_bean_id = t.roasted_bean_id',
+    joinCols: 'rb.name AS roasted_bean_name',
+    // 指定熟豆品項的產品，銷貨時要靠每包淨重換算扣多少熟豆
+    validate(row) {
+      if (row.roasted_bean_id && !(row.net_weight_g > 0)) {
+        return '已指定熟豆品項的產品必須填「每包淨重（g）」，銷貨時才能換算要扣多少熟豆';
+      }
+      return null;
+    },
+    refs: [['sale_items', 'product_id', '銷貨明細']],
+  },
+  'roasted-beans': {
+    table: 'roasted_beans', pk: 'roasted_bean_id', label: '熟豆品項',
+    search: ['name'],
+    fields: {
+      name: { type: 'text', required: true },
+      roast_level: { type: 'enum', values: ROAST_LEVELS },
+      shelf_life_days: { type: 'int' },
+      safety_stock_kg: { type: 'number', default: 0 },
+      note: { type: 'text' },
+      is_active: { type: 'bool', default: 1 },
+    },
+    refs: [
+      ['products', 'roasted_bean_id', '產品'],
+      ['roast_batches', 'roasted_bean_id', '烘焙批次'],
+    ],
   },
 };
 

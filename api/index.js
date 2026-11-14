@@ -4,6 +4,8 @@ import { authenticate } from './lib/auth.js';
 import { resources } from './master/resources.js';
 import { handleMaster } from './master/crud.js';
 import { handlePurchases } from './transaction/purchases.js';
+import { handleSales } from './transaction/sales.js';
+import { handleRoasts } from './inventory/roasts.js';
 import { handleInventory } from './inventory/stock.js';
 
 export async function handleApi(request, env) {
@@ -17,6 +19,8 @@ export async function handleApi(request, env) {
     if (resource === 'me') return json({ data: { email: user } });
     if (resources[resource]) return await handleMaster(resource, id, request, env);
     if (resource === 'purchases') return await handlePurchases(id, request, env, user);
+    if (resource === 'sales') return await handleSales(id, request, env, user);
+    if (resource === 'roast-batches') return await handleRoasts(id, request, env, user);
     if (resource === 'inventory') return await handleInventory(id, request, env);
     throw new HttpError(404, '找不到此路徑');
   } catch (err) {

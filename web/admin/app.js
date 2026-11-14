@@ -1,4 +1,4 @@
-// 咖啡烘豆進銷存 — 後台管理（Phase 1）
+// 咖啡烘豆進銷存 — 後台管理（Phase 1＋2）
 // 純 JavaScript，無建置步驟。顏色慣例：紅 = 增加／入庫，綠 = 減少／出庫。
 'use strict';
 
@@ -21,7 +21,12 @@ async function api(path, { method = 'GET', body } = {}) {
   });
   let data = null;
   try { data = await res.json(); } catch { /* 非 JSON */ }
-  if (!res.ok) throw new Error(data?.error || `發生錯誤（${res.status}）`);
+  if (!res.ok) {
+    const err = new Error(data?.error || `發生錯誤（${res.status}）`);
+    err.status = res.status;
+    err.detail = data?.detail ?? null; // 例：銷貨熟豆不足 { code: 'SHORTAGE', shortages }
+    throw err;
+  }
   return data;
 }
 
@@ -109,14 +114,26 @@ const MASTERS = {
   },
   products: {
     title: '產品', pk: 'product_id',
-    cols: [['sku', '料號'], ['name', '產品名稱'], ['category', '類別'], ['roast_level', '烘焙度'], ['net_weight_g', '淨重 g', 'num'], ['retail_price', '零售價', 'num'], ['wholesale_price', '批發價', 'num']],
+    cols: [['sku', '料號'], ['name', '產品名稱'], ['category', '類別'], ['roasted_bean_name', '使用熟豆'], ['net_weight_g', '淨重 g', 'num'], ['retail_price', '零售價', 'num'], ['wholesale_price', '批發價', 'num']],
     fields: [
       ['sku', '料號／條碼'], ['name', '產品名稱', 'text', { required: true }],
       ['category', '類別', 'enum', { values: ['單品豆', '綜合豆', '濾掛', '禮盒', '器具', '其他'], noBlank: true }],
-      ['roast_level', '烘焙度', 'enum', { values: ROAST }], ['net_weight_g', '每包淨重（g）', 'number'],
+      ['roasted_bean_id', '使用熟豆品項（銷貨時扣此熟豆庫存）', 'fk', { resource: 'roasted-beans', idKey: 'roasted_bean_id', blank: '不扣熟豆（器具、禮盒等）' }],
+      ['net_weight_g', '每包淨重（g）', 'number'], ['roast_level', '烘焙度', 'enum', { values: ROAST }],
       ['retail_price', '零售價', 'number'], ['wholesale_price', '批發價', 'number'], ['shelf_life_days', '賞味期（天，烘焙日起算）', 'number'],
       ['note', '備註', 'textarea', { full: true }],
     ],
+    hint: '同一鍋熟豆可以包成不同規格：例如「招牌綜合 250g」與「招牌綜合 1kg」都選同一個熟豆品項，銷貨時依「數量 × 每包淨重」扣熟豆庫存。',
+  },
+  'roasted-beans': {
+    title: '熟豆品項', pk: 'roasted_bean_id',
+    cols: [['name', '名稱'], ['roast_level', '烘焙度'], ['shelf_life_days', '賞味期（天）', 'num'], ['safety_stock_kg', '安全庫存 kg', 'num']],
+    fields: [
+      ['name', '名稱', 'text', { required: true, full: true }], ['roast_level', '烘焙度', 'enum', { values: ROAST }],
+      ['shelf_life_days', '賞味期（天，烘焙日起算）', 'number'], ['safety_stock_kg', '安全庫存量（kg）', 'number'],
+      ['note', '備註', 'textarea', { full: true }],
+    ],
+    hint: '熟豆品項 = 烘焙批次的產出（例：招牌綜合 中深焙）。建立後到「產品」主檔指定每個產品使用哪個熟豆品項。',
   },
 };
 
@@ -169,7 +186,7 @@ async function masterForm(key, id, reload) {
       const v = row[name];
       let ctl;
       if (type === 'enum') ctl = `<select name="${name}">${o.noBlank ? '' : '<option value=""></option>'}${o.values.map((x) => `<option ${v === x ? 'selected' : ''}>${x}</option>`).join('')}</select>`;
-      else if (type === 'fk') ctl = `<select name="${name}">${options(fkData[o.resource], o.idKey, v)}</select>`;
+      else if (type === 'fk') ctl = `<select name="${name}">${options(fkData[o.resource], o.idKey, v, o.blank ? { blank: o.blank } : {})}</select>`;
       else if (type === 'textarea') ctl = `<textarea name="${name}" rows="2">${esc(v)}</textarea>`;
       else ctl = `<input name="${name}" type="${type === 'number' ? 'number' : type}" ${type === 'number' ? 'step="any" min="0"' : ''} value="${esc(v)}" ${o.required ? 'required' : ''}>`;
       return `<label class="${o.full ? 'full' : ''}">${label}${o.required ? ' *' : ''}${ctl}</label>`;
@@ -185,7 +202,7 @@ async function masterForm(key, id, reload) {
       <form id="f">
         <div class="form-grid">${m.fields.map(input).join('')}
           <label>狀態<select name="is_active"><option value="1" ${row.is_active ? 'selected' : ''}>啟用</option><option value="0" ${row.is_active ? '' : 'selected'}>停用</option></select></label>
-        </div>${prefs}
+        </div>${m.hint ? `<p class="hint">${m.hint}</p>` : ''}${prefs}
         <div class="form-actions">
           ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
           <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
@@ -436,7 +453,7 @@ async function movementModal(title, params, unit) {
       <div class="table-wrap">${data.length ? `<table><thead><tr><th>日期</th><th>異動類型</th><th class="num">數量（${unit}）</th><th class="num">單位成本</th><th class="num">金額</th><th>來源單據</th><th>備註</th><th>操作者</th></tr></thead><tbody>
         ${data.map((m) => `<tr><td>${esc(m.movement_date.slice(0, 16))}</td><td><span class="tag ${m.qty > 0 ? 'up' : 'down'}">${esc(m.movement_type)}</span></td>
           <td class="num ${m.qty > 0 ? 'up' : 'down'}">${m.qty > 0 ? '+' : '−'}${kg(Math.abs(m.qty))}</td><td class="num">${fmt(m.unit_cost, 2)}</td>
-          <td class="num ${m.qty > 0 ? 'up' : 'down'}">${m.qty > 0 ? '+' : '−'}${money(Math.abs(m.amount))}</td><td>${esc(m.purchase_no)}</td><td>${esc(m.note)}</td><td>${esc(m.created_by)}</td></tr>`).join('')}
+          <td class="num ${m.qty > 0 ? 'up' : 'down'}">${m.qty > 0 ? '+' : '−'}${money(Math.abs(m.amount))}</td><td>${esc(m.doc_no)}${m.customer_name ? '（' + esc(m.customer_name) + '）' : ''}</td><td>${m.note === m.doc_no ? '' : esc(m.note)}</td><td>${esc(m.created_by)}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">此區間沒有異動</div>'}</div>
       <div class="form-actions"><button id="cancel">關閉</button></div>`, true);
     $('#cancel').onclick = closeModal;
@@ -451,7 +468,7 @@ async function pageStockPackaging() {
       <label>迄日<input type="date" id="to" value="${today()}"></label>
       <button id="search">查詢</button>
     </div>
-    <p class="hint">點任一列可看異動明細。Phase 1 只有進貨入庫；包裝耗用於後續階段加入。</p>
+    <p class="hint">點任一列可看異動明細。目前只有進貨入庫；包裝耗用於 Phase 4（配方）加入。</p>
     <div class="card"><div class="table-wrap" id="list"></div></div>`;
   const load = async () => {
     try {
@@ -468,10 +485,428 @@ async function pageStockPackaging() {
   load();
 }
 
+// ---------------------------------------------------------------- 烘焙批次
+const pct = (r) => (r === null || r === undefined ? '' : fmt(r * 100, 1) + '%');
+const LOSS_MIN = 0.10, LOSS_MAX = 0.25;
+const lossTag = (r) => (r < LOSS_MIN || r > LOSS_MAX ? `<span class="tag warn">${pct(r)}</span>` : pct(r));
+
+async function pageRoasts() {
+  const [rbeans, beans] = await Promise.all([lookup('roasted-beans', true), lookup('green-beans', true)]);
+  $('#main').innerHTML = `
+    <h2>烘焙批次</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>熟豆品項<select id="rbean">${options(rbeans, 'roasted_bean_id', null, { blank: '全部' })}</select></label>
+      <label>投入生豆<select id="bean">${options(beans, 'bean_id', null, { blank: '全部' })}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="add" class="primary">＋ 新增烘焙批次</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/roast-batches' + qs({ from: $('#from').value, to: $('#to').value, roasted_bean_id: $('#rbean').value, bean_id: $('#bean').value }));
+      $('#stats').innerHTML = [['批次數', fmt(summary.count), ''], ['投入生豆 kg', '−' + kg(summary.input_kg), 'down'], ['產出熟豆 kg', '+' + kg(summary.output_kg), 'up'], ['平均失重率', pct(summary.loss_rate) || '—', ''], ['投入成本', money(summary.input_cost), '']]
+        .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>烘焙日期</th><th>批次編號</th><th>熟豆品項</th><th>投入生豆</th><th class="num">投入 kg</th><th class="num">產出 kg</th><th class="num">失重率</th><th class="num">熟豆成本/kg</th><th class="num">剩餘 kg</th><th>賞味期限</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.batch_id}"><td>${esc(r.roast_date)}</td><td>${esc(r.batch_no)}</td><td>${esc(r.roasted_bean_name)}</td><td>${esc(r.inputs_text)}</td>
+          <td class="num down">−${kg(r.input_total_kg)}</td><td class="num up">+${kg(r.output_kg)}</td><td class="num">${lossTag(r.loss_rate)}</td>
+          <td class="num">${fmt(r.unit_cost, 2)}</td><td class="num ${r.current_kg < 0 ? 'down' : ''}">${kg(r.current_kg)}</td><td>${esc(r.best_before)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有烘焙批次</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => roastForm(Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#add').onclick = () => roastForm(null, load);
+  load();
+}
+
+async function roastForm(id, reload) {
+  try {
+    const [rbeans, stock] = await Promise.all([lookup('roasted-beans', true), api('/inventory/green-beans')]);
+    const b = id ? (await api(`/roast-batches/${id}`)).data : { roast_date: today(), inputs: [{}] };
+    const locked = !!b.locked;
+    const dis = locked ? 'disabled' : '';
+
+    // 可選的生豆批號：目前有庫存的，加上本批次原本就投入的（修改時可用量要加回自己的投入）
+    const own = new Map((b.inputs || []).filter((i) => i.lot_id).map((i) => [i.lot_id, i]));
+    const lots = [];
+    for (const bean of stock.data) {
+      for (const l of bean.lots) {
+        const avail = r2(l.closing_qty + (own.get(l.lot_id)?.input_kg || 0));
+        if (avail > 0.0005) lots.push({ lot_id: l.lot_id, lot_no: l.lot_no, bean_name: bean.name, unit_cost: l.unit_cost, avail });
+      }
+    }
+    for (const i of own.values()) { // 鎖定檢視時批號可能已用完，仍要顯示
+      if (!lots.some((l) => l.lot_id === i.lot_id)) lots.push({ lot_id: i.lot_id, lot_no: i.lot_no, bean_name: i.bean_name, unit_cost: i.unit_cost, avail: i.input_kg });
+    }
+    const lotOpts = (sel) => '<option value="">選擇生豆批號</option>' + lots.map((l) =>
+      `<option value="${l.lot_id}" ${l.lot_id === sel ? 'selected' : ''}>${esc(l.lot_no)}｜${esc(l.bean_name)}｜可用 ${kg(l.avail)} kg｜${fmt(l.unit_cost, 2)} 元/kg</option>`).join('');
+
+    const inputRow = (it = {}) => `<tr>
+      <td><select data-k="lot_id" ${dis}>${lotOpts(it.lot_id)}</select></td>
+      <td><input data-k="input_kg" ${dis} type="number" step="any" min="0" value="${esc(it.input_kg)}" class="num"></td>
+      <td class="num" data-cost></td><td class="num" data-amount></td>
+      <td>${locked ? '' : '<button type="button" class="link" data-del>刪除</button>'}</td></tr>`;
+
+    const box = openModal(`
+      <h2>${id ? '烘焙批次 ' + esc(b.batch_no) : '新增烘焙批次'}</h2>
+      ${locked ? '<div class="notice">此批次的熟豆已被使用（銷貨出庫），只能檢視，無法修改或刪除。</div>' : ''}
+      ${!id && !lots.length ? '<div class="notice">目前沒有任何有庫存的生豆批號，請先建立進貨單。</div>' : ''}
+      ${!id && !rbeans.some((r) => r.is_active) ? '<div class="notice">還沒有熟豆品項，請先到「主檔 → 熟豆品項」新增（例：招牌綜合 中深焙）。</div>' : ''}
+      <form id="f">
+        <div class="form-grid">
+          <label>烘焙日期 *<input name="roast_date" type="date" required value="${esc(b.roast_date)}" ${dis}></label>
+          <label>批次編號<input name="batch_no" value="${esc(b.batch_no)}" placeholder="自動產生" ${dis}></label>
+          <label>熟豆品項 *<select name="roasted_bean_id" required ${dis}>${options(rbeans, 'roasted_bean_id', b.roasted_bean_id, { blank: '請選擇' })}</select></label>
+          <label>產出熟豆 kg *<input name="output_kg" type="number" step="any" min="0" required value="${esc(b.output_kg)}" ${dis}></label>
+          <label class="full">備註<input name="note" value="${esc(b.note)}" ${dis}></label>
+        </div>
+        <div class="section-title">投入生豆 ${locked ? '' : '<button type="button" id="addItem">＋ 新增一筆</button>'}</div>
+        <div class="table-wrap"><table class="items"><thead><tr><th style="min-width:320px">生豆批號</th><th style="width:110px">投入 kg</th><th class="num">成本/kg</th><th class="num">投入成本</th><th></th></tr></thead>
+          <tbody id="items">${b.inputs.map(inputRow).join('')}</tbody></table></div>
+        <p class="hint">只需記錄：投入哪幾批生豆各幾公斤、產出多少熟豆。失重率與熟豆成本自動計算；失重率不在 10%～25% 時存檔前會提醒。</p>
+        <div class="totals">
+          <div><span>投入總重</span><span id="tIn" class="down"></span></div>
+          <div><span>產出熟豆</span><span id="tOut" class="up"></span></div>
+          <div><span>失重率</span><span id="tLoss"></span></div>
+          <div><span>投入總成本</span><span id="tCost"></span></div>
+          <div class="grand"><span>熟豆成本/kg</span><span id="tUnit"></span></div>
+        </div>
+        ${id ? `<p class="hint">熟豆剩餘 ${kg(b.current_kg)} kg${b.best_before ? '，賞味期限 ' + esc(b.best_before) : ''}。</p>` : ''}
+        <div class="form-actions">
+          ${id && !locked ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">${locked ? '關閉' : '取消'}</button>${locked ? '' : '<button class="primary">存檔</button>'}
+        </div>
+      </form>`, true);
+
+    const f = $('#f', box);
+    const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
+    const calc = () => {
+      const rows = $$('#items tr', box);
+      let inKg = 0, cost = 0;
+      readItems().forEach((it, i) => {
+        const lot = lots.find((l) => l.lot_id === Number(it.lot_id));
+        const q = Number(it.input_kg) || 0;
+        const amt = lot ? r2(q * lot.unit_cost) : 0;
+        inKg += q; cost += amt;
+        $('[data-cost]', rows[i]).textContent = lot ? fmt(lot.unit_cost, 2) : '';
+        $('[data-amount]', rows[i]).textContent = lot && q ? money(amt) : '';
+      });
+      const out = Number(f.output_kg.value) || 0;
+      const loss = inKg > 0 && out > 0 ? (inKg - out) / inKg : null;
+      $('#tIn', box).textContent = '−' + kg(inKg) + ' kg';
+      $('#tOut', box).textContent = '+' + kg(out) + ' kg';
+      $('#tLoss', box).innerHTML = loss === null ? '—' : lossTag(loss);
+      $('#tCost', box).textContent = money(cost);
+      $('#tUnit', box).textContent = out > 0 ? fmt(cost / out, 2) : '—';
+      return loss;
+    };
+    $('#items', box).addEventListener('input', calc);
+    $('#items', box).addEventListener('change', calc);
+    $('#items', box).addEventListener('click', (e) => {
+      if (e.target.matches('[data-del]')) { e.target.closest('tr').remove(); calc(); }
+    });
+    f.output_kg.oninput = calc;
+    if (!locked) $('#addItem', box).onclick = () => { $('#items', box).insertAdjacentHTML('beforeend', inputRow()); calc(); };
+    $('#cancel', box).onclick = closeModal;
+    calc();
+
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(f));
+      body.inputs = readItems().filter((it) => it.lot_id || it.input_kg);
+      const loss = calc();
+      if (loss !== null && (loss < LOSS_MIN || loss > LOSS_MAX)
+        && !confirm(`失重率 ${pct(loss)} 不在一般範圍（10%～25%）。\n請確認投入與產出公斤數沒有輸入錯誤。\n\n仍要存檔嗎？`)) return;
+      try {
+        const res = await api(id ? `/roast-batches/${id}` : '/roast-batches', { method: id ? 'PUT' : 'POST', body });
+        closeModal();
+        toast(`已存檔 ${res.data.batch_no}（失重率 ${pct(res.data.loss_rate)}）`);
+        reload();
+      } catch (err) { fail(err); }
+    };
+    if (id && !locked) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除烘焙批次 ${b.batch_no}？\n投入的生豆會加回庫存，產出的熟豆批次會一併刪除，無法復原。`)) return;
+      try { await api(`/roast-batches/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 銷貨單
+const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
+const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
+const PAY_STATUS = ['未收', '部分收款', '已收清'];
+const PAID_ON_SALE = ['現金', 'LINE Pay', '刷卡'];
+const plainOpts = (values, sel, blank = null) => (blank === null ? '' : `<option value="">${blank}</option>`) + values.map((v) => `<option ${v === sel ? 'selected' : ''}>${v}</option>`).join('');
+const payTag = (s) => `<span class="tag ${s === '已收清' ? '' : 'warn'}">${esc(s)}</span>`;
+
+async function pageSales() {
+  const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
+  $('#main').innerHTML = `
+    <h2>銷貨單</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>客戶<select id="cust"><option value="">全部</option><option value="none">散客</option>${options(customers, 'customer_id', null, { blank: null })}</select></label>
+      <label>產品<select id="prod">${options(products, 'product_id', null, { blank: '全部' })}</select></label>
+      <label>通路<select id="chan">${plainOpts(CHANNELS, null, '全部')}</select></label>
+      <label>收款<select id="pay">${plainOpts(PAY_STATUS, null, '全部')}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="add" class="primary">＋ 新增銷貨單</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/sales' + qs({ from: $('#from').value, to: $('#to').value, customer_id: $('#cust').value, product_id: $('#prod').value, channel: $('#chan').value, payment_status: $('#pay').value }));
+      $('#stats').innerHTML = [['銷貨單數', fmt(summary.count), ''], ['營業額', money(summary.total_amount), 'up'], ['熟豆成本', money(summary.cost_amount), ''], ['毛利', money(summary.gross_profit), ''], ['未收款', money(summary.unpaid_amount), ''], ['出貨熟豆 kg', '−' + kg(summary.roasted_kg), 'down']]
+        .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>銷貨日期</th><th>單號</th><th>客戶</th><th>通路</th><th class="num">明細數</th><th class="num">小計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">合計</th><th class="num">毛利</th><th>付款方式</th><th>收款</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.sale_id}"><td>${esc(r.sale_date)}</td><td>${esc(r.sale_no)}</td><td>${r.customer_name ? esc(r.customer_name) : '<span class="tag">散客</span>'}</td><td>${esc(r.channel)}</td>
+          <td class="num">${r.item_count}</td><td class="num">${money(r.subtotal)}</td><td class="num">${r.discount ? '−' + money(r.discount) : ''}</td><td class="num">${r.shipping_fee ? money(r.shipping_fee) : ''}</td>
+          <td class="num up"><b>${money(r.total_amount)}</b></td><td class="num">${money(r.gross_profit)}</td><td>${esc(r.payment_method)}</td><td>${payTag(r.payment_status)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有銷貨單</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => saleForm(Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#add').onclick = () => saleForm(null, load);
+  load();
+}
+
+async function saleForm(id, reload) {
+  try {
+    const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
+    const s = id ? (await api(`/sales/${id}`)).data : { sale_date: today(), channel: '門市', payment_method: '現金', payment_status: '已收清', items: [{}], discount: 0, shipping_fee: 0 };
+    const prodOf = (pid) => products.find((p) => p.product_id === Number(pid));
+    const priceFor = (p, cust) => (cust?.price_level === '批發價' && p.wholesale_price != null ? p.wholesale_price : p.retail_price);
+
+    const itemRow = (it = {}) => `<tr>
+      <td><select data-k="product_id">${options(products, 'product_id', it.product_id, { blank: '選擇產品' })}</select></td>
+      <td><select data-k="grind_size">${plainOpts(GRIND, it.grind_size, '')}</select></td>
+      <td><input data-k="qty" type="number" step="1" min="1" value="${esc(it.qty)}" class="num"></td>
+      <td><input data-k="unit_price" type="number" step="any" min="0" value="${esc(it.unit_price)}" class="num"></td>
+      <td class="num" data-amount></td><td class="num down" data-kg></td>
+      <td data-lots>${(it.lots || []).map((l) => `${esc(l.batch_no)} ${kg(l.kg)}kg`).join('、')}${it.undeducted_kg ? ` <span class="tag warn">未扣 ${kg(it.undeducted_kg)}kg</span>` : ''}</td>
+      <td><button type="button" class="link" data-del>刪除</button></td></tr>`;
+
+    const box = openModal(`
+      <h2>${id ? '銷貨單 ' + esc(s.sale_no) : '新增銷貨單'}</h2>
+      <form id="f">
+        <div class="form-grid">
+          <label>銷貨日期 *<input name="sale_date" type="date" required value="${esc(s.sale_date)}"></label>
+          <label>銷貨單號<input name="sale_no" value="${esc(s.sale_no)}" placeholder="自動產生"></label>
+          <label>客戶<select name="customer_id">${options(customers, 'customer_id', s.customer_id, { blank: '散客（不指定）', label: (c) => `${c.name}（${c.price_level}）` })}</select></label>
+          <label>通路<select name="channel">${plainOpts(CHANNELS, s.channel)}</select></label>
+          <label>付款方式<select name="payment_method">${plainOpts(PAY_METHODS, s.payment_method)}</select></label>
+          <label>收款狀態<select name="payment_status">${plainOpts(PAY_STATUS, s.payment_status)}</select></label>
+          <label>應收日期<input name="due_date" type="date" value="${esc(s.due_date)}"></label>
+          <label class="full">備註<input name="note" value="${esc(s.note)}"></label>
+        </div>
+        <div id="prefs"></div>
+        <div class="section-title">明細 <button type="button" id="addItem">＋ 新增一筆</button></div>
+        <div class="table-wrap"><table class="items"><thead><tr><th style="min-width:220px">產品</th><th style="width:90px">研磨</th><th style="width:80px">數量</th><th style="width:100px">單價</th>
+          <th class="num">小計</th><th class="num">扣熟豆 kg</th><th>出貨熟豆批次</th><th></th></tr></thead>
+          <tbody id="items">${s.items.map(itemRow).join('')}</tbody></table></div>
+        <p class="hint">選產品後自動帶入單價（批發價客戶帶批發價）。有指定熟豆品項的產品，存檔時依「數量 × 每包淨重」以先進先出扣熟豆庫存；熟豆不足時會先提醒，確認後仍可存檔。</p>
+        <div class="totals">
+          <div><span>明細小計</span><span id="tItems"></span></div>
+          <div><span>折扣</span><input name="discount" type="number" step="any" min="0" value="${esc(s.discount)}" style="width:110px;text-align:right"></div>
+          <div><span>運費</span><input name="shipping_fee" type="number" step="any" min="0" value="${esc(s.shipping_fee)}" style="width:110px;text-align:right"></div>
+          <div class="grand"><span>合計</span><span id="tTotal" class="up"></span></div>
+          ${id ? `<div><span>熟豆成本</span><span>${money(s.cost_amount)}</span></div><div><span>毛利（不含運費）</span><span>${money(s.gross_profit)}</span></div>` : ''}
+        </div>
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`, true);
+
+    const f = $('#f', box);
+    const custOf = () => customers.find((c) => c.customer_id === Number(f.customer_id.value));
+    const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
+    const recalc = () => {
+      const rows = $$('#items tr', box);
+      let sum = 0;
+      readItems().forEach((it, i) => {
+        const p = prodOf(it.product_id);
+        const q = Number(it.qty) || 0;
+        const amt = r2(q * (Number(it.unit_price) || 0));
+        sum += amt;
+        $('[data-amount]', rows[i]).textContent = q ? money(amt) : '';
+        $('[data-kg]', rows[i]).textContent = p?.roasted_bean_id && p.net_weight_g && q ? '−' + kg(q * p.net_weight_g / 1000) : '';
+      });
+      $('#tItems', box).textContent = money(sum);
+      $('#tTotal', box).textContent = money(r2(sum) - (Number(f.discount.value) || 0) + (Number(f.shipping_fee.value) || 0));
+    };
+    // 顯示客戶喜好（Phase 1 客戶主檔），方便出貨時確認烘焙度與研磨度
+    const showPrefs = async () => {
+      const el = $('#prefs', box);
+      el.innerHTML = '';
+      if (!f.customer_id.value) return;
+      try {
+        const { data } = await api(`/customers/${f.customer_id.value}`);
+        const lines = (data.preferences || []).map((p) => [p.roast_level, p.grind_size, p.flavor_notes, p.brew_method, p.favorite_products && '常買：' + p.favorite_products, p.dislikes && '不喜歡：' + p.dislikes, p.note].filter(Boolean).join('／')).filter(Boolean);
+        const extra = [data.payment_terms && '付款條件：' + data.payment_terms, data.note].filter(Boolean).join('　');
+        if (lines.length || extra) el.innerHTML = `<p class="hint">${lines.length ? '客戶喜好：' + lines.map(esc).join('；') : ''}${lines.length && extra ? '　｜　' : ''}${esc(extra)}</p>`;
+      } catch { /* 喜好只是提示，讀不到不影響開單 */ }
+    };
+
+    $('#items', box).addEventListener('input', recalc);
+    $('#items', box).addEventListener('change', (e) => {
+      if (e.target.dataset.k === 'product_id') { // 帶入單價
+        const p = prodOf(e.target.value);
+        const tr = e.target.closest('tr');
+        if (p) {
+          const price = priceFor(p, custOf());
+          $('[data-k=unit_price]', tr).value = price ?? '';
+          if (!$('[data-k=qty]', tr).value) $('[data-k=qty]', tr).value = 1;
+        }
+        $('[data-lots]', tr).textContent = '';
+      }
+      recalc();
+    });
+    $('#items', box).addEventListener('click', (e) => {
+      if (e.target.matches('[data-del]')) { e.target.closest('tr').remove(); recalc(); }
+    });
+    f.discount.oninput = f.shipping_fee.oninput = recalc;
+    f.payment_method.onchange = () => { f.payment_status.value = PAID_ON_SALE.includes(f.payment_method.value) ? '已收清' : '未收'; };
+    f.customer_id.onchange = () => {
+      const c = custOf();
+      if (!id && c && /月結/.test(c.payment_terms || '')) { f.payment_method.value = '月結'; f.payment_status.value = '未收'; }
+      showPrefs();
+    };
+    $('#addItem', box).onclick = () => { $('#items', box).insertAdjacentHTML('beforeend', itemRow()); recalc(); };
+    $('#cancel', box).onclick = closeModal;
+    recalc();
+    showPrefs();
+
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(f));
+      body.items = readItems().filter((it) => it.product_id || it.qty).map((it) => ({ product_id: it.product_id, grind_size: it.grind_size, qty: it.qty, unit_price: it.unit_price }));
+      const save = (extra = {}) => api(id ? `/sales/${id}` : '/sales', { method: id ? 'PUT' : 'POST', body: { ...body, ...extra } });
+      try {
+        let res;
+        try { res = await save(); } catch (err) {
+          if (err.detail?.code !== 'SHORTAGE') throw err;
+          const lines = err.detail.shortages.map((x) => `・${x.product_name}：需要 ${kg(x.need_kg)} kg，不足 ${kg(x.short_kg)} kg`
+            + (x.batch_no ? `（會記在批次 ${x.batch_no}，該批庫存變負數）` : '（還沒有任何烘焙批次，這筆不會扣庫存）'));
+          if (!confirm(`熟豆庫存不足（只計算烘焙日在銷貨日當天或之前的批次）：\n\n${lines.join('\n')}\n\n補登烘焙批次後，重新存檔這張銷貨單就會重新配批次。\n仍要存檔嗎？`)) return;
+          res = await save({ allow_shortage: true });
+        }
+        closeModal();
+        toast(`已存檔 ${res.data.sale_no}（合計 ${money(res.data.total_amount)}）`);
+        reload();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除銷貨單 ${s.sale_no}？\n已扣的熟豆會加回庫存，無法復原。`)) return;
+      try { await api(`/sales/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 客戶購買紀錄
+async function pageCustomerHistory() {
+  const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
+  $('#main').innerHTML = `
+    <h2>客戶購買紀錄</h2>
+    <div class="toolbar">
+      <label>客戶<select id="cust"><option value="">全部客戶</option><option value="none">散客</option>${options(customers, 'customer_id', null, { blank: null })}</select></label>
+      <label>起日<input type="date" id="from" value=""></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>產品<select id="prod">${options(products, 'product_id', null, { blank: '全部' })}</select></label>
+      <button id="search">查詢</button>
+    </div>
+    <p class="hint">購買紀錄 = 依客戶篩選的銷貨明細。起日留空 = 從最早紀錄算起。點任一列可開啟該張銷貨單。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/sales/items' + qs({ from: $('#from').value, to: $('#to').value, customer_id: $('#cust').value, product_id: $('#prod').value }));
+      const top = summary.by_product.slice(0, 3).map((p) => `${p.product_name} ×${fmt(p.qty)}`).join('、');
+      $('#stats').innerHTML = [['購買次數', fmt(summary.sale_count)], ['累計金額', money(summary.amount)], ['累計熟豆 kg', kg(summary.kg)], ['最近購買日', summary.last_date || '—']]
+        .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`).join('')
+        + `<div class="stat" style="grid-column: span 2"><div class="k">常買品項</div><div class="v" style="font-size:15px">${esc(top) || '—'}</div></div>`;
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>銷貨日期</th><th>單號</th><th>客戶</th><th>產品</th><th>研磨</th><th class="num">數量</th><th class="num">單價</th><th class="num">小計</th><th>通路</th><th>收款</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.sale_id}"><td>${esc(r.sale_date)}</td><td>${esc(r.sale_no)}</td><td>${r.customer_name ? esc(r.customer_name) : '<span class="tag">散客</span>'}</td><td>${esc(r.product_name)}</td><td>${esc(r.grind_size)}</td>
+          <td class="num">${fmt(r.qty)}</td><td class="num">${money(r.unit_price)}</td><td class="num">${money(r.amount)}</td><td>${esc(r.channel)}</td><td>${payTag(r.payment_status)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">沒有購買紀錄</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => saleForm(Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#cust').onchange = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 熟豆庫存查詢
+async function pageStockRoasted() {
+  const rbeans = await lookup('roasted-beans', true);
+  $('#main').innerHTML = `
+    <h2>熟豆庫存查詢</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>熟豆品項<select id="bean">${options(rbeans, 'roasted_bean_id', null, { blank: '全部' })}</select></label>
+      <label>顯示<select id="empty"><option value="">有庫存或異動的品項</option><option value="1">全部品項</option></select></label>
+      <button id="search">查詢</button>
+    </div>
+    <p class="hint">熟豆批次 = 烘焙批次。期初 = 起日前一天的庫存；期末 = 迄日當天結束的庫存。點品項可展開批次，點批次可看異動明細。<span class="up">紅色 = 入庫</span>、<span class="down">綠色 = 出庫</span>。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+
+  const load = async () => {
+    try {
+      const range = { from: $('#from').value, to: $('#to').value };
+      const { data, total } = await api('/inventory/roasted' + qs({ ...range, roasted_bean_id: $('#bean').value, show_empty: $('#empty').value }));
+      $('#stats').innerHTML = [['期初 kg', kg(total.opening_qty), ''], ['本期烘焙產出 kg', '+' + kg(total.in_qty), 'up'], ['本期出庫 kg', '−' + kg(total.out_qty), 'down'], ['期末 kg', kg(total.closing_qty), ''], ['期末庫存金額', money(total.closing_amount), '']]
+        .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+      if (!data.length) { $('#list').innerHTML = '<div class="empty">沒有資料</div>'; return; }
+      const lotTag = (l) => (l.status === '負庫存' ? '<span class="tag warn">負庫存（待補登烘焙）</span>'
+        : l.expired ? '<span class="tag warn">已過賞味期</span>' : l.expiring ? '<span class="tag warn">7 天內到期</span>' : `<span class="tag">${l.status}</span>`);
+      $('#list').innerHTML = `<table><thead><tr><th>熟豆品項／批次</th><th>烘焙日</th><th>賞味期限</th><th class="num">失重率</th><th class="num">成本/kg</th>
+        <th class="num">期初 kg</th><th class="num">入庫 kg</th><th class="num">出庫 kg</th><th class="num">期末 kg</th><th class="num">期末金額</th><th>狀態</th></tr></thead><tbody>
+        ${data.map((b) => `
+          <tr class="clickable bean" data-bean="${b.roasted_bean_id}"><td>▸ <b>${esc(b.name)}</b>（${b.lots.length} 批）</td><td></td><td></td><td></td>
+            <td class="num">${b.avg_cost == null ? '' : fmt(b.avg_cost, 2)}</td><td class="num">${kg(b.opening_qty)}</td>${inCell(b.in_qty)}${outCell(b.out_qty)}
+            <td class="num"><b>${kg(b.closing_qty)}</b></td><td class="num">${money(b.closing_amount)}</td>
+            <td>${[b.negative ? '<span class="tag warn">有負庫存</span>' : '', b.low_stock ? `<span class="tag warn">低於安全庫存 ${fmt(b.safety_stock_kg)}kg</span>` : '', b.expiring_count ? `<span class="tag warn">${b.expiring_count} 批將到期</span>` : ''].join(' ')}</td></tr>
+          ${b.lots.map((l) => `<tr class="sub clickable" data-parent="${b.roasted_bean_id}" data-lot="${l.roasted_lot_id}" data-lotno="${esc(l.batch_no)}" hidden>
+            <td>${esc(l.batch_no)}</td><td>${esc(l.roast_date)}</td><td>${esc(l.best_before)}</td><td class="num">${pct(l.loss_rate)}</td>
+            <td class="num">${fmt(l.unit_cost, 2)}</td><td class="num">${kg(l.opening_qty)}</td>${inCell(l.in_qty)}${outCell(l.out_qty)}
+            <td class="num">${kg(l.closing_qty)}</td><td class="num">${money(l.closing_amount)}</td><td>${lotTag(l)}</td></tr>`).join('')}`).join('')}
+        <tr class="total"><td>合計</td><td></td><td></td><td></td><td></td><td class="num">${kg(total.opening_qty)}</td>${inCell(total.in_qty)}${outCell(total.out_qty)}
+          <td class="num">${kg(total.closing_qty)}</td><td class="num">${money(total.closing_amount)}</td><td></td></tr>
+        </tbody></table>`;
+      $$('#list tr.bean').forEach((tr) => tr.onclick = () => {
+        const subs = $$(`#list tr[data-parent="${tr.dataset.bean}"]`);
+        const open = subs[0]?.hidden;
+        subs.forEach((x) => (x.hidden = !open));
+        tr.cells[0].firstChild.textContent = open ? '▾ ' : '▸ ';
+      });
+      $$('#list tr.sub').forEach((tr) => tr.onclick = () => movementModal(`熟豆批次 ${tr.dataset.lotno} 異動明細`, { item_type: '熟豆', roasted_lot_id: tr.dataset.lot, ...range }, 'kg'));
+      if (data.length === 1) $('#list tr.bean').click();
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  load();
+}
+
 // ---------------------------------------------------------------- 路由
 const ROUTES = {
   purchases: pagePurchases,
+  sales: pageSales,
+  'customer-history': pageCustomerHistory,
+  roasts: pageRoasts,
   'stock-beans': pageStockBeans,
+  'stock-roasted': pageStockRoasted,
   'stock-packaging': pageStockPackaging,
   ...Object.fromEntries(Object.keys(MASTERS).map((k) => [k, () => pageMaster(k)])),
 };

@@ -1,4 +1,4 @@
-// 主檔通用 CRUD（供應商、客戶＋喜好、生豆品項、包材、產品）
+// 主檔通用 CRUD（供應商、客戶＋喜好、生豆品項、包材、產品、熟豆品項）
 import { HttpError, json, readJson, toInt, isDate, nowTW } from '../lib/http.js';
 import { resources, PREF_FIELDS } from './resources.js';
 
@@ -39,6 +39,12 @@ export function clean(fields, body, { partial = false } = {}) {
     }
   }
   return out;
+}
+
+/** 主檔自訂檢核（resources.js 的 validate） */
+function check(r, row) {
+  const msg = r.validate?.(row);
+  if (msg) throw new HttpError(400, msg);
 }
 
 async function getOne(db, r, id) {
@@ -91,6 +97,7 @@ export async function handleMaster(resourceKey, id, request, env) {
   if (!id && method === 'POST') {
     const body = await readJson(request);
     const data = clean(r.fields, body);
+    check(r, data);
     const cols = Object.keys(data);
     const insert = db
       .prepare(`INSERT INTO ${r.table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
@@ -113,9 +120,10 @@ export async function handleMaster(resourceKey, id, request, env) {
 
   // ---- 修改 ----
   if (method === 'PUT' || method === 'PATCH') {
-    await getOne(db, r, pk);
+    const current = await getOne(db, r, pk);
     const body = await readJson(request);
     const data = clean(r.fields, body, { partial: method === 'PATCH' });
+    check(r, { ...current, ...data });
     const cols = Object.keys(data);
     const stmts = [];
     if (cols.length) {

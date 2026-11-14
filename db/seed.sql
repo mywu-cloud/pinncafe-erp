@@ -1,8 +1,13 @@
 -- =============================================================
--- Phase 1 範例資料（僅供開發測試）
--- 執行前請先跑 schema.sql；重跑會先清空 Phase 1 資料表
+-- 範例資料（Phase 1＋2，僅供開發測試）
+-- 執行前請先跑 schema.sql；重跑會先清空所有資料表
 -- =============================================================
 DELETE FROM inventory_movements;
+DELETE FROM sale_items;
+DELETE FROM sales;
+DELETE FROM roasted_lots;
+DELETE FROM roast_batch_inputs;
+DELETE FROM roast_batches;
 DELETE FROM green_bean_lots;
 DELETE FROM purchase_items;
 DELETE FROM purchases;
@@ -10,6 +15,7 @@ DELETE FROM doc_sequences;
 DELETE FROM customer_preferences;
 DELETE FROM customers;
 DELETE FROM products;
+DELETE FROM roasted_beans;
 DELETE FROM packaging_items;
 DELETE FROM green_beans;
 DELETE FROM suppliers;
@@ -48,13 +54,20 @@ INSERT INTO packaging_items (packaging_id, name, unit, unit_cost, supplier_id, s
  (2, '產品標籤',           '張', 1.5, 3, 500, NULL),
  (3, '濾掛袋',             '個', 0.8, 3, 1000, NULL);
 
--- ---------- 產品 ----------
-INSERT INTO products (product_id, sku, name, category, roast_level, net_weight_g, retail_price, wholesale_price, shelf_life_days) VALUES
- (1, 'SO-ETH-250', '耶加雪菲 水洗 250g', '單品豆', '淺焙',   250, 520, 420, 60),
- (2, 'SO-COL-250', '哥倫比亞 慧蘭 250g', '單品豆', '中焙',   250, 450, 360, 60),
- (3, 'BL-HSE-250', '招牌綜合 250g',      '綜合豆', '中深焙', 250, 380, 300, 60),
- (4, 'BL-HSE-1KG', '招牌綜合 1kg（營業用）', '綜合豆', '中深焙', 1000, 1300, 1050, 45),
- (5, 'DB-ETH-10',  '耶加雪菲 濾掛 10入', '濾掛',   '淺焙',   100, 300, 230, 90);
+-- ---------- 熟豆品項（Phase 2）----------
+INSERT INTO roasted_beans (roasted_bean_id, name, roast_level, shelf_life_days, safety_stock_kg, note) VALUES
+ (1, '耶加雪菲 水洗（淺焙）', '淺焙',   60, 3, NULL),
+ (2, '哥倫比亞 慧蘭（中焙）', '中焙',   60, 3, '尚未烘焙'),
+ (3, '招牌綜合（中深焙）',    '中深焙', 45, 5, '巴西 6：哥倫比亞 4');
+
+-- ---------- 產品（roasted_bean_id：使用哪個熟豆品項；250g 與 1kg 共用同一鍋熟豆）----------
+INSERT INTO products (product_id, sku, name, category, roast_level, net_weight_g, retail_price, wholesale_price, shelf_life_days, roasted_bean_id) VALUES
+ (1, 'SO-ETH-250', '耶加雪菲 水洗 250g', '單品豆', '淺焙',   250, 520, 420, 60, 1),
+ (2, 'SO-COL-250', '哥倫比亞 慧蘭 250g', '單品豆', '中焙',   250, 450, 360, 60, 2),
+ (3, 'BL-HSE-250', '招牌綜合 250g',      '綜合豆', '中深焙', 250, 380, 300, 60, 3),
+ (4, 'BL-HSE-1KG', '招牌綜合 1kg（營業用）', '綜合豆', '中深焙', 1000, 1300, 1050, 45, 3),
+ (5, 'DB-ETH-10',  '耶加雪菲 濾掛 10入', '濾掛',   '淺焙',   100, 300, 230, 90, 1),
+ (6, 'EQ-V60-01',  'V60 濾杯 01',        '器具',   NULL,     NULL, 350, 280, NULL, NULL);
 
 -- =============================================================
 -- 進貨單（數字已依規則計算：運費＋稅額只攤給生豆，依 kg 比例）
@@ -101,7 +114,46 @@ INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement
  -- 示範出庫：寄樣品 0.5kg 耶加雪菲生豆（此異動使 P20261102-01 鎖定、不可修改）
  ('2026-11-10 14:00:00', '生豆', 1, '樣品',     -0.5, 405,  -202.5, NULL, NULL, NULL, '寄給巷口咖啡館試烘', 'seed');
 
+-- =============================================================
+-- Phase 2：烘焙批次、熟豆庫存、銷貨
+-- =============================================================
+
+-- R20261109-01：耶加雪菲 10kg × 405 = 4,050 → 產出 8.5kg，失重 15%，熟豆 476.4706 元/kg
+-- R20261110-01：巴西 12kg × 245 + 哥倫比亞 8kg × 328 = 5,564 → 產出 16.8kg，失重 16%，熟豆 331.1905 元/kg
+INSERT INTO roast_batches (batch_id, batch_no, roast_date, roasted_bean_id, input_total_kg, output_kg, loss_rate, input_total_cost, unit_cost, note, created_by) VALUES
+ (1, 'R20261109-01', '2026-11-09', 1, 10, 8.5,  0.15, 4050, 476.4706, NULL, 'seed'),
+ (2, 'R20261110-01', '2026-11-10', 3, 20, 16.8, 0.16, 5564, 331.1905, NULL, 'seed');
+INSERT INTO roast_batch_inputs (input_id, batch_id, line_no, lot_id, input_kg, unit_cost, amount) VALUES
+ (1, 1, 1, 1, 10, 405, 4050),
+ (2, 2, 1, 2, 12, 245, 2940),
+ (3, 2, 2, 3, 8,  328, 2624);
+INSERT INTO roasted_lots (roasted_lot_id, batch_id, roasted_bean_id, roast_date, best_before, initial_kg, unit_cost) VALUES
+ (1, 1, 1, '2026-11-09', '2027-01-08', 8.5,  476.4706),
+ (2, 2, 3, '2026-11-10', '2026-12-25', 16.8, 331.1905);
+
+-- S20261111-01：王小明 門市現金，耶加雪菲 250g × 2 → 扣熟豆 0.5kg
+-- S20261113-01：巷口咖啡館 批發月結，招牌綜合 1kg × 5 ＋ 250g × 4 → 扣熟豆 6kg
+INSERT INTO sales (sale_id, sale_no, sale_date, customer_id, channel, subtotal, discount, shipping_fee, total_amount, cost_amount, payment_method, payment_status, due_date, note, created_by) VALUES
+ (1, 'S20261111-01', '2026-11-11', 1, '門市', 1040, 0, 0, 1040, 238.24,  '現金', '已收清', NULL, NULL, 'seed'),
+ (2, 'S20261113-01', '2026-11-13', 2, '批發', 6450, 0, 0, 6450, 1987.14, '月結', '未收', '2026-12-13', '週二送貨', 'seed');
+INSERT INTO sale_items (item_id, sale_id, line_no, product_id, grind_size, qty, unit_price, amount, deduct_kg, unit_cost, cost_amount) VALUES
+ (1, 1, 1, 1, '手沖', 2, 520,  1040, 0.5, 119.12,   238.24),
+ (2, 2, 1, 4, '原豆', 5, 1050, 5250, 5,   331.19,   1655.95),
+ (3, 2, 2, 3, '原豆', 4, 300,  1200, 1,   82.7975,  331.19);
+
+INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement_type, qty, unit_cost, amount, ref_doc_type, ref_doc_id, ref_item_id, note, created_by) VALUES
+ ('2026-11-09 00:00:00', '生豆', 1, '烘焙投入', -10,  405,      -4050,    'roast_batches', 1, 1, 'R20261109-01', 'seed'),
+ ('2026-11-09 00:00:00', '熟豆', 1, '烘焙產出', 8.5,  476.4706, 4050,     'roast_batches', 1, NULL, 'R20261109-01', 'seed'),
+ ('2026-11-10 00:00:00', '生豆', 2, '烘焙投入', -12,  245,      -2940,    'roast_batches', 2, 2, 'R20261110-01', 'seed'),
+ ('2026-11-10 00:00:00', '生豆', 3, '烘焙投入', -8,   328,      -2624,    'roast_batches', 2, 3, 'R20261110-01', 'seed'),
+ ('2026-11-10 00:00:00', '熟豆', 2, '烘焙產出', 16.8, 331.1905, 5564,     'roast_batches', 2, NULL, 'R20261110-01', 'seed'),
+ ('2026-11-11 00:00:00', '熟豆', 1, '銷貨出庫', -0.5, 476.4706, -238.24,  'sales', 1, 1, 'S20261111-01', 'seed'),
+ ('2026-11-13 00:00:00', '熟豆', 2, '銷貨出庫', -5,   331.1905, -1655.95, 'sales', 2, 2, 'S20261113-01', 'seed'),
+ ('2026-11-13 00:00:00', '熟豆', 2, '銷貨出庫', -1,   331.1905, -331.19,  'sales', 2, 3, 'S20261113-01', 'seed');
+
 -- ---------- 流水號 ----------
 INSERT INTO doc_sequences (prefix, ymd, last_no) VALUES
  ('P', '20261102', 1), ('P', '20261108', 1), ('P', '20261112', 1),
- ('L', '20261102', 2), ('L', '20261108', 2);
+ ('L', '20261102', 2), ('L', '20261108', 2),
+ ('R', '20261109', 1), ('R', '20261110', 1),
+ ('S', '20261111', 1), ('S', '20261113', 1);

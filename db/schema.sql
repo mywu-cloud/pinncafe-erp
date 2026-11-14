@@ -1,7 +1,9 @@
 -- =============================================================
--- 咖啡烘豆進銷存系統 — Phase 1 Schema（Cloudflare D1 / SQLite）
--- 範圍：主檔（供應商、客戶＋喜好、生豆品項、包材、產品）
---       進貨（表頭＋明細）、生豆批號、庫存異動
+-- 咖啡烘豆進銷存系統 — Schema（Cloudflare D1 / SQLite）
+-- Phase 1：主檔（供應商、客戶＋喜好、生豆品項、包材、產品）
+--          進貨（表頭＋明細）、生豆批號、庫存異動
+-- Phase 2：熟豆品項、烘焙批次＋投入明細、熟豆庫存、銷貨（表頭＋明細）
+--          既有資料庫升級請先跑 db/migrations/002_phase2.sql 再跑本檔
 -- 規格：ARCHITECTURE.md
 --
 -- 慣例
@@ -120,6 +122,22 @@ CREATE TABLE IF NOT EXISTS packaging_items (
 );
 
 -- -------------------------------------------------------------
+-- 2.9 熟豆品項（Phase 2）
+--   烘焙批次產出的是「熟豆品項」；同一熟豆可包成不同規格的產品（250g／1kg）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roasted_beans (
+  roasted_bean_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name            TEXT    NOT NULL,
+  roast_level     TEXT CHECK (roast_level IS NULL OR roast_level IN ('淺焙','中焙','中深焙','深焙')),
+  shelf_life_days INTEGER,                            -- 賞味期（天，烘焙日起算）
+  safety_stock_kg REAL    NOT NULL DEFAULT 0,
+  note            TEXT,
+  is_active       INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
+-- -------------------------------------------------------------
 -- 2.5 產品
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS products (
@@ -136,7 +154,9 @@ CREATE TABLE IF NOT EXISTS products (
   note            TEXT,
   is_active       INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
   created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
-  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  -- Phase 2：使用哪個熟豆品項（銷貨時依 數量 × net_weight_g 扣該熟豆庫存；空白 = 不扣熟豆）
+  roasted_bean_id INTEGER REFERENCES roasted_beans(roasted_bean_id)
 );
 
 -- -------------------------------------------------------------
@@ -243,15 +263,144 @@ CREATE INDEX IF NOT EXISTS idx_mv_ref  ON inventory_movements(ref_doc_type, ref_
 -- 單號流水號
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS doc_sequences (
-  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號
+  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號、'R' 烘焙批次、'S' 銷貨單
   ymd     TEXT NOT NULL,     -- 'YYYYMMDD'
   last_no INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (prefix, ymd)
 );
 
 -- =============================================================
+-- Phase 2
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- 4.2 烘焙批次
+--   batch_no：自動產生 R{YYYYMMDD}-{NN}，存檔前可修改
+--   loss_rate = (input_total_kg − output_kg) / input_total_kg
+--   unit_cost = input_total_cost / output_kg（熟豆每 kg 成本）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roast_batches (
+  batch_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_no         TEXT    NOT NULL UNIQUE,
+  roast_date       TEXT    NOT NULL,
+  roasted_bean_id  INTEGER NOT NULL REFERENCES roasted_beans(roasted_bean_id),
+  input_total_kg   REAL    NOT NULL,                  -- auto
+  output_kg        REAL    NOT NULL CHECK (output_kg > 0),
+  loss_rate        REAL    NOT NULL,                  -- auto
+  input_total_cost REAL    NOT NULL,                  -- auto
+  unit_cost        REAL    NOT NULL,                  -- auto
+  note             TEXT,
+  created_by       TEXT,
+  created_at       TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at       TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_roast_date ON roast_batches(roast_date);
+CREATE INDEX IF NOT EXISTS idx_roast_bean ON roast_batches(roasted_bean_id);
+
+-- -------------------------------------------------------------
+-- 4.3 烘焙投入明細（一個批次可投入多個生豆批號）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roast_batch_inputs (
+  input_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id  INTEGER NOT NULL REFERENCES roast_batches(batch_id) ON DELETE CASCADE,
+  line_no   INTEGER NOT NULL DEFAULT 1,
+  lot_id    INTEGER NOT NULL REFERENCES green_bean_lots(lot_id),
+  input_kg  REAL    NOT NULL CHECK (input_kg > 0),
+  unit_cost REAL    NOT NULL,                         -- auto 帶入生豆批號成本
+  amount    REAL    NOT NULL                          -- auto input_kg × unit_cost
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_roast_inputs_line ON roast_batch_inputs(batch_id, line_no);
+CREATE INDEX IF NOT EXISTS idx_roast_inputs_lot ON roast_batch_inputs(lot_id);
+
+-- -------------------------------------------------------------
+-- 4.4 熟豆庫存（一個烘焙批次產出一個熟豆批次；批號 = 烘焙批次編號）
+--   current_kg 不存欄位 → 見 v_roasted_lot_stock
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roasted_lots (
+  roasted_lot_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id        INTEGER NOT NULL UNIQUE REFERENCES roast_batches(batch_id) ON DELETE CASCADE,
+  roasted_bean_id INTEGER NOT NULL REFERENCES roasted_beans(roasted_bean_id),
+  roast_date      TEXT    NOT NULL,
+  best_before     TEXT,                               -- auto 烘焙日 + 熟豆品項賞味天數
+  initial_kg      REAL    NOT NULL CHECK (initial_kg > 0),
+  unit_cost       REAL    NOT NULL,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_roasted_lots_bean ON roasted_lots(roasted_bean_id, roast_date);
+
+-- -------------------------------------------------------------
+-- 3.3 銷貨（表頭）
+--   sale_no：自動產生 S{YYYYMMDD}-{NN}，存檔前可修改
+--   total_amount = subtotal − discount + shipping_fee
+--   cost_amount  = Σ明細成本（出貨當下的熟豆成本）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sales (
+  sale_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  sale_no        TEXT    NOT NULL UNIQUE,
+  sale_date      TEXT    NOT NULL,
+  customer_id    INTEGER REFERENCES customers(customer_id),   -- 散客可為空
+  channel        TEXT    NOT NULL DEFAULT '門市'
+                 CHECK (channel IN ('門市','電話','LINE','官網','蝦皮','批發')),
+  subtotal       REAL    NOT NULL DEFAULT 0,          -- auto
+  discount       REAL    NOT NULL DEFAULT 0,
+  shipping_fee   REAL    NOT NULL DEFAULT 0,
+  total_amount   REAL    NOT NULL DEFAULT 0,          -- auto
+  cost_amount    REAL    NOT NULL DEFAULT 0,          -- auto
+  payment_method TEXT    NOT NULL DEFAULT '現金'
+                 CHECK (payment_method IN ('現金','轉帳','LINE Pay','刷卡','貨到付款','月結')),
+  payment_status TEXT    NOT NULL DEFAULT '未收'
+                 CHECK (payment_status IN ('未收','部分收款','已收清')),
+  due_date       TEXT,
+  note           TEXT,
+  created_by     TEXT,
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_sales_date     ON sales(sale_date);
+CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id);
+
+-- -------------------------------------------------------------
+-- 3.4 銷貨明細
+--   deduct_kg：應扣熟豆 kg = qty × 產品 net_weight_g ÷ 1000（產品未指定熟豆品項 → 0）
+--   實際扣了哪些熟豆批次記在 inventory_movements（ref_doc_type='sales'、ref_item_id=item_id）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sale_items (
+  item_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  sale_id     INTEGER NOT NULL REFERENCES sales(sale_id) ON DELETE CASCADE,
+  line_no     INTEGER NOT NULL DEFAULT 1,
+  product_id  INTEGER NOT NULL REFERENCES products(product_id),
+  grind_size  TEXT CHECK (grind_size IS NULL OR grind_size IN ('原豆','手沖','義式','法壓','冷萃')),
+  qty         INTEGER NOT NULL CHECK (qty > 0),
+  unit_price  REAL    NOT NULL CHECK (unit_price >= 0),
+  amount      REAL    NOT NULL,                       -- auto qty × unit_price
+  deduct_kg   REAL    NOT NULL DEFAULT 0,             -- auto
+  unit_cost   REAL    NOT NULL DEFAULT 0,             -- auto 每單位成本 = cost_amount ÷ qty
+  cost_amount REAL    NOT NULL DEFAULT 0,             -- auto
+  note        TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_items_line ON sale_items(sale_id, line_no);
+CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
+
+-- =============================================================
 -- VIEWS
 -- =============================================================
+
+-- 熟豆批次現有庫存（全期間）
+DROP VIEW IF EXISTS v_roasted_lot_stock;
+CREATE VIEW v_roasted_lot_stock AS
+SELECT
+  rl.roasted_lot_id, rl.batch_id, rb.batch_no, rl.roasted_bean_id, n.name AS roasted_bean_name,
+  rl.roast_date, rl.best_before, rl.initial_kg, rl.unit_cost,
+  ROUND(COALESCE(SUM(m.qty), 0), 3)    AS current_kg,
+  ROUND(COALESCE(SUM(m.amount), 0), 2) AS current_amount,
+  -- 除了烘焙產出之外是否已有其他異動（有 → 烘焙批次鎖定不可改）
+  SUM(CASE WHEN m.movement_type <> '烘焙產出' THEN 1 ELSE 0 END) AS other_movement_count
+FROM roasted_lots rl
+JOIN roast_batches rb ON rb.batch_id = rl.batch_id
+JOIN roasted_beans n ON n.roasted_bean_id = rl.roasted_bean_id
+LEFT JOIN inventory_movements m
+       ON m.item_type = '熟豆' AND m.item_ref_id = rl.roasted_lot_id
+GROUP BY rl.roasted_lot_id;
 
 -- 生豆批號現有庫存（全期間）
 DROP VIEW IF EXISTS v_green_bean_lot_stock;

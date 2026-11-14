@@ -8,28 +8,7 @@
 // 表頭、明細、批號、異動全部放在同一個 D1 batch（單一交易）。
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
-
-const pad2 = (n) => String(n).padStart(2, '0');
-
-/** 取得某日某前綴目前已用到的最大流水號 */
-async function lastSeq(db, prefix, ymd) {
-  const table = prefix === 'P' ? 'purchases' : 'green_bean_lots';
-  const col = prefix === 'P' ? 'purchase_no' : 'lot_no';
-  const seq = await db.prepare('SELECT last_no FROM doc_sequences WHERE prefix = ? AND ymd = ?').bind(prefix, ymd).first();
-  const { results } = await db.prepare(`SELECT ${col} AS no FROM ${table} WHERE ${col} LIKE ?`).bind(`${prefix}${ymd}-%`).all();
-  let max = seq?.last_no || 0;
-  for (const r of results) {
-    const m = r.no.match(/-(\d+)$/);
-    if (m) max = Math.max(max, Number(m[1]));
-  }
-  return max;
-}
-
-const makeNo = (prefix, ymd, n) => `${prefix}${ymd}-${pad2(n)}`;
-const seqOf = (no, prefix, ymd) => {
-  const m = String(no).match(new RegExp(`^${prefix}${ymd}-(\\d+)$`));
-  return m ? Number(m[1]) : 0;
-};
+import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
 
 /** 驗證輸入並算出所有 auto 欄位 */
 async function prepare(db, body, { excludePurchaseId = null } = {}) {
@@ -171,10 +150,8 @@ function itemStatements(db, p, user) {
     }
   }
   // 流水號（只增不減，刪單後不重複使用號碼）
-  const seqSql = `INSERT INTO doc_sequences (prefix, ymd, last_no) VALUES (?, ?, ?)
-                  ON CONFLICT(prefix, ymd) DO UPDATE SET last_no = MAX(last_no, excluded.last_no)`;
-  if (p.pLast > 0) stmts.push(db.prepare(seqSql).bind('P', p.ymd, p.pLast));
-  if (p.lLast > 0) stmts.push(db.prepare(seqSql).bind('L', p.ymd, p.lLast));
+  if (p.pLast > 0) stmts.push(seqStatement(db, 'P', p.ymd, p.pLast));
+  if (p.lLast > 0) stmts.push(seqStatement(db, 'L', p.ymd, p.lLast));
   return stmts;
 }
 
