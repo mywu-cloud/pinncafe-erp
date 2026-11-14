@@ -9,7 +9,8 @@ binding = "DB"
 database_name = "pinncafe-erp"
 database_id = "a31cae4a-e37e-4353-8baa-a19928c96adf"
 
-# Cloudflare Access（正式環境在 Pages 專案的環境變數設定，不要寫在這裡也可以）
-# [vars]
-# CF_ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
-# CF_ACCESS_AUD = "Access Application 的 AUD Tag"
+# Cloudflare Access：專案有 wrangler.toml 時，Pages 以此檔為設定來源（儀表板無法另設一般變數），
+# 所以寫在這裡。這兩個值是識別碼，不是密鑰。
+[vars]
+CF_ACCESS_TEAM_DOMAIN = "tw-mywu.cloudflareaccess.com"
+CF_ACCESS_AUD = "b81b2de6599aec2ae1c73d46fdc8b7c1c148ef3874b335e6c36798bccb3fa8c3"
