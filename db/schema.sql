@@ -4,6 +4,8 @@
 --          進貨（表頭＋明細）、生豆批號、庫存異動
 -- Phase 2：熟豆品項、烘焙批次＋投入明細、熟豆庫存、銷貨（表頭＋明細）
 --          既有資料庫升級請先跑 db/migrations/002_phase2.sql 再跑本檔
+-- 期初庫存：生豆／包材開帳庫存（movement_type = '期初'）
+--          既有資料庫升級請先跑 db/migrations/003_opening_stock.sql 再跑本檔
 -- 規格：ARCHITECTURE.md
 --
 -- 慣例
@@ -214,6 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_items_bean     ON purchase_items(bean_id
 -- -------------------------------------------------------------
 -- 4.1 生豆批號
 --   lot_no：自動產生 L{YYYYMMDD}-{NN}，存檔前可修改
+--   purchase_item_id 為空 = 期初庫存建立的批號（沒有進貨單）
 --   current_kg / status 不存欄位 → 見 v_green_bean_lot_stock
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS green_bean_lots (
@@ -243,12 +246,12 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   item_type     TEXT    NOT NULL CHECK (item_type IN ('生豆','熟豆','包材','成品')),
   item_ref_id   INTEGER NOT NULL,
   movement_type TEXT    NOT NULL CHECK (movement_type IN (
-                  '進貨入庫','烘焙投入','烘焙產出','包裝耗用','銷貨出庫','退貨',
+                  '期初','進貨入庫','烘焙投入','烘焙產出','包裝耗用','銷貨出庫','退貨',
                   '盤盈','盤虧','試喝','樣品','報廢')),
   qty           REAL    NOT NULL CHECK (qty <> 0),
   unit_cost     REAL    NOT NULL DEFAULT 0,
   amount        REAL    NOT NULL DEFAULT 0,
-  ref_doc_type  TEXT,                                 -- 'purchases' …
+  ref_doc_type  TEXT,                                 -- 'purchases'／'roast_batches'／'sales'／'opening'（期初庫存）
   ref_doc_id    INTEGER,
   ref_item_id   INTEGER,                              -- 來源明細（purchase_items.item_id …）
   note          TEXT,
@@ -411,8 +414,8 @@ SELECT
   ROUND(COALESCE(SUM(m.qty), 0), 3)    AS current_kg,
   ROUND(COALESCE(SUM(m.amount), 0), 2) AS current_amount,
   CASE WHEN COALESCE(SUM(m.qty), 0) > 0.0005 THEN '使用中' ELSE '已用完' END AS status,
-  -- 除了進貨入庫之外是否已有其他異動（有 → 進貨單鎖定不可改）
-  SUM(CASE WHEN m.movement_type <> '進貨入庫' THEN 1 ELSE 0 END) AS other_movement_count
+  -- 除了進貨入庫／期初之外是否已有其他異動（有 → 進貨單、期初批號鎖定不可改）
+  SUM(CASE WHEN m.movement_type NOT IN ('進貨入庫','期初') THEN 1 ELSE 0 END) AS other_movement_count
 FROM green_bean_lots l
 JOIN green_beans b ON b.bean_id = l.bean_id
 LEFT JOIN inventory_movements m

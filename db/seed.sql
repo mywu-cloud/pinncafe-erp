@@ -46,7 +46,7 @@ INSERT INTO green_beans (bean_id, name, country, region, farm, process, variety,
  (2, '巴西 喜拉朵 日曬',          '巴西',     '喜拉朵',   NULL,           '日曬', '黃波旁', '1100m',      '2025/26', 83.0, 1, 30, '綜合豆基底'),
  (3, '哥倫比亞 慧蘭 水洗',        '哥倫比亞', '慧蘭',     NULL,           '水洗', 'Caturra', '1700m',     '2025/26', 85.0, 2, 15, NULL),
  (4, '瓜地馬拉 安提瓜 水洗',      '瓜地馬拉', '安提瓜',   NULL,           '水洗', '波旁',   '1500m',      '2025/26', 84.5, 2, 15, NULL),
- (5, '肯亞 AA 水洗',              '肯亞',     '涅里',     NULL,           '水洗', 'SL28',   '1800m',      '2025/26', 88.0, 1, 10, '尚未進貨');
+ (5, '肯亞 AA 水洗',              '肯亞',     '涅里',     NULL,           '水洗', 'SL28',   '1800m',      '2025/26', 88.0, 1, 10, '只有期初庫存，尚未進貨');
 
 -- ---------- 包材 ----------
 INSERT INTO packaging_items (packaging_id, name, unit, unit_cost, supplier_id, safety_stock, note) VALUES
@@ -151,9 +151,16 @@ INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement
  ('2026-11-13 00:00:00', '熟豆', 2, '銷貨出庫', -5,   331.1905, -1655.95, 'sales', 2, 2, 'S20261113-01', 'seed'),
  ('2026-11-13 00:00:00', '熟豆', 2, '銷貨出庫', -1,   331.1905, -331.19,  'sales', 2, 3, 'S20261113-01', 'seed');
 
+-- ---------- 期初庫存（開帳時手上已有的庫存；不經過進貨單，日期設在開帳日前一天）----------
+INSERT INTO green_bean_lots (lot_id, lot_no, bean_id, purchase_item_id, received_date, initial_kg, unit_cost, storage_location, note) VALUES
+ (5, 'L20261031-01', 5, NULL, '2026-10-31', 8, 520, 'C-1', '開帳前剩餘');
+INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement_type, qty, unit_cost, amount, ref_doc_type, ref_doc_id, ref_item_id, note, created_by) VALUES
+ ('2026-10-31 00:00:00', '生豆', 5, '期初', 8,   520, 4160, 'opening', NULL, NULL, 'L20261031-01', 'seed'),
+ ('2026-10-31 00:00:00', '包材', 3, '期初', 300, 0.8, 240,  'opening', NULL, NULL, '開帳前剩餘', 'seed');
+
 -- ---------- 流水號 ----------
 INSERT INTO doc_sequences (prefix, ymd, last_no) VALUES
  ('P', '20261102', 1), ('P', '20261108', 1), ('P', '20261112', 1),
- ('L', '20261102', 2), ('L', '20261108', 2),
+ ('L', '20261031', 1), ('L', '20261102', 2), ('L', '20261108', 2),
  ('R', '20261109', 1), ('R', '20261110', 1),
  ('S', '20261111', 1), ('S', '20261113', 1);

@@ -179,7 +179,7 @@ async function packaging(db, url) {
 
 // ------------------------------------------------------------------
 // GET /api/inventory/movements?item_type=&from=&to=&bean_id=&lot_id=&roasted_bean_id=&roasted_lot_id=&packaging_id=&movement_type=
-// 異動明細（流水帳）。doc_no = 來源單據編號（進貨單／烘焙批次／銷貨單）
+// 異動明細（流水帳）。doc_no = 來源單據編號（進貨單／烘焙批次／銷貨單；期初庫存顯示「期初庫存」）
 // ------------------------------------------------------------------
 async function movements(db, url) {
   const { from, to } = dateRange(url);
@@ -203,7 +203,7 @@ async function movements(db, url) {
   const { results } = await db.prepare(
     `SELECT m.*, l.lot_no, b.name AS bean_name, k.name AS packaging_name, k.unit AS packaging_unit,
             rlb.batch_no AS roasted_lot_no, rn.name AS roasted_bean_name,
-            pu.purchase_no, COALESCE(pu.purchase_no, dr.batch_no, ds.sale_no) AS doc_no, dc.name AS customer_name
+            pu.purchase_no, COALESCE(pu.purchase_no, dr.batch_no, ds.sale_no, CASE WHEN m.ref_doc_type = 'opening' THEN '期初庫存' END) AS doc_no, dc.name AS customer_name
      FROM inventory_movements m
      LEFT JOIN green_bean_lots l ON m.item_type = '生豆' AND l.lot_id = m.item_ref_id
      LEFT JOIN green_beans b ON b.bean_id = l.bean_id

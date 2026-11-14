@@ -3,7 +3,7 @@
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
 >
-> **實作狀態**：Phase 1、Phase 2 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2），各表欄位也已同步更新。
+> **實作狀態**：Phase 1、Phase 2 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存），各表欄位也已同步更新。
 > 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
@@ -22,6 +22,7 @@
 10. [原規劃檢查結果](#10-原規劃檢查結果)
 11. [Phase 1 實作決議](#11-phase-1-實作決議)
 12. [Phase 2 實作決議](#12-phase-2-實作決議)
+13. [期初庫存](#13-期初庫存)
 
 ---
 
@@ -346,7 +347,7 @@
 | lot_id | PK | 內部流水編號（整數） |
 | lot_no | text UNIQUE | 生豆批號。自動產生 `L{YYYYMMDD}-{NN}`（例：L20261114-01），存檔前可手動修改 |
 | bean_id | FK → green_beans **IDX** | |
-| purchase_item_id | FK → purchase_items（UNIQUE） | 來源進貨明細 |
+| purchase_item_id | FK → purchase_items（UNIQUE） | 來源進貨明細；**空白 = 期初庫存建立的批號**（見第 13 節） |
 | received_date | date **IDX** | 入庫日期（= 進貨日期） |
 | initial_kg | decimal | 入庫重量 |
 | unit_cost | decimal | 每 kg 成本（含攤提運費＋稅額） |
@@ -354,7 +355,7 @@
 | note | text | |
 | created_at | datetime | |
 
-> `current_kg`（現有重量）與 `status`（使用中／已用完）**不存欄位**，由 view `v_green_bean_lot_stock` 依 `inventory_movements` 加總即時算出；view 另提供 `other_movement_count`（進貨入庫以外的異動筆數，> 0 代表批號已被使用）。
+> `current_kg`（現有重量）與 `status`（使用中／已用完）**不存欄位**，由 view `v_green_bean_lot_stock` 依 `inventory_movements` 加總即時算出；view 另提供 `other_movement_count`（進貨入庫、期初以外的異動筆數，> 0 代表批號已被使用）。
 
 ### 4.2 烘焙批次 `roast_batches`（簡化版；Phase 2 已實作）
 
@@ -409,7 +410,7 @@
 | movement_date | datetime **IDX** | |
 | item_type | enum | 生豆／熟豆／包材／成品 |
 | item_ref_id | FK | lot_id／roasted_lot_id／packaging_id／product_id |
-| movement_type | enum | 進貨入庫／烘焙投入／烘焙產出／包裝耗用／銷貨出庫／退貨／盤盈／盤虧／試喝／樣品／報廢 |
+| movement_type | enum | 期初／進貨入庫／烘焙投入／烘焙產出／包裝耗用／銷貨出庫／退貨／盤盈／盤虧／試喝／樣品／報廢 |
 | qty | decimal | 正數 = 入庫、負數 = 出庫 |
 | unit_cost | decimal | |
 | amount | decimal `auto` | qty × unit_cost（帶正負號，加總即為庫存金額） |
@@ -421,7 +422,7 @@
 
 > 所有庫存數量皆由此表加總計算，**不直接修改庫存數字**。
 
-> 異動的 `movement_date` = 單據日期 00:00:00（進貨日期／烘焙日期／銷貨日期）。`ref_doc_type`：`purchases`／`roast_batches`／`sales`。索引：`movement_date`、`(item_type, item_ref_id, movement_date)`、`(ref_doc_type, ref_doc_id)`。
+> 異動的 `movement_date` = 單據日期 00:00:00（進貨日期／烘焙日期／銷貨日期）。`ref_doc_type`：`purchases`／`roast_batches`／`sales`／`opening`（期初庫存，沒有單據編號）。索引：`movement_date`、`(item_type, item_ref_id, movement_date)`、`(ref_doc_type, ref_doc_id)`。
 
 ### 4.5.1 單號流水號 `doc_sequences`
 
@@ -720,3 +721,35 @@ erDiagram
 | `/api/inventory/movements` | GET | 新增篩選 `roasted_bean_id`、`roasted_lot_id`；回傳 `doc_no`（進貨單／烘焙批次／銷貨單編號） |
 
 銷貨存檔時熟豆不足會回 `409`，`detail = { code: 'SHORTAGE', shortages: [...] }`；請求加上 `allow_shortage: true` 即可存檔。
+
+---
+
+## 13. 期初庫存
+
+開始使用系統時手上已有的庫存（開帳庫存）的登錄方式。與使用者確認：新增獨立的「期初庫存」功能，範圍為**生豆與包材**（熟豆不做期初，從烘焙批次開始記）。
+
+**觀念**：庫存查詢的「期初」不是可填的欄位，而是「起日之前所有庫存異動的加總」，所以不能直接修改。開帳庫存也是寫一筆異動（`movement_type = '期初'`、`ref_doc_type = 'opening'`），日期填**開帳日的前一天**，之後查詢開帳日起的區間，這些數量就落在「期初」欄。
+
+| 類型 | 存檔內容 |
+|---|---|
+| 生豆 | 建立一個沒有進貨單的批號（`green_bean_lots.purchase_item_id` 為空，`received_date` = 期初日期，`unit_cost` = 輸入的每 kg 成本）＋ 一筆期初異動（+kg） |
+| 包材 | 只寫一筆期初異動（+數量、單價）；包材沒有批號 |
+
+規則：
+
+- 不算進貨金額、不產生應付帳款。
+- 生豆批號自動產生 `L{YYYYMMDD}-{NN}`（與進貨批號共用流水號），可手動輸入，不可重複。
+- 生豆期初批號還沒有其他異動（烘焙投入…）時可修改／刪除；被使用後鎖定。包材期初隨時可修改／刪除。
+- 期初批號的每 kg 成本會帶入之後的烘焙成本。
+- 生豆庫存查詢中，期初批號的「進貨單」欄顯示「期初庫存」；異動明細的來源單據顯示「期初庫存」。
+
+API：
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/opening-stock` | GET | 列出生豆期初批號（含目前剩餘、`locked`）與包材期初異動、合計 |
+| `/api/opening-stock` | POST | 新增。`{ item_type: '生豆', bean_id, date, qty, unit_cost, lot_no?, storage_location?, note? }` 或 `{ item_type: '包材', packaging_id, date, qty, unit_cost, note? }` |
+| `/api/opening-stock/g{lot_id}` | GET／PUT／DELETE | 生豆期初批號 |
+| `/api/opening-stock/p{movement_id}` | GET／PUT／DELETE | 包材期初異動 |
+
+**既有資料庫升級**：`movement_type` 的 CHECK 新增「期初」，SQLite 不能直接改 CHECK，需重建 `inventory_movements`：先跑 `db/migrations/003_opening_stock.sql`（搬移資料、資料不變），再跑 `db/schema.sql` 重建 view。

@@ -405,7 +405,8 @@ async function pageStockBeans() {
       <label>顯示<select id="empty"><option value="">有庫存或異動的品項</option><option value="1">全部品項</option></select></label>
       <button id="search">查詢</button>
     </div>
-    <p class="hint">庫存由庫存異動加總計算。期初 = 起日前一天的庫存；期末 = 迄日當天結束的庫存。點品項可展開批號，點批號可看異動明細。<span class="up">紅色 = 入庫</span>、<span class="down">綠色 = 出庫</span>。</p>
+    <p class="hint">庫存由庫存異動加總計算。期初 = 起日前一天的庫存；期末 = 迄日當天結束的庫存。點品項可展開批號，點批號可看異動明細。<span class="up">紅色 = 入庫</span>、<span class="down">綠色 = 出庫</span>。
+      「期初」是算出來的、不能直接改；開帳時手上已有的生豆請到 <a href="#opening-stock">期初庫存</a> 登錄。</p>
     <div class="stats" id="stats"></div>
     <div class="card"><div class="table-wrap" id="list"></div></div>`;
 
@@ -424,7 +425,7 @@ async function pageStockBeans() {
             <td class="num"><b>${kg(b.closing_qty)}</b></td><td class="num">${money(b.closing_amount)}</td>
             <td>${b.low_stock ? `<span class="tag warn">低於安全庫存 ${fmt(b.safety_stock_kg)}kg</span>` : ''}</td></tr>
           ${b.lots.map((l) => `<tr class="sub clickable" data-parent="${b.bean_id}" data-lot="${l.lot_id}" data-lotno="${esc(l.lot_no)}" hidden>
-            <td>${esc(l.lot_no)}</td><td>${esc(l.received_date)}</td><td>${esc(l.purchase_no)}</td><td>${esc(l.storage_location)}</td>
+            <td>${esc(l.lot_no)}</td><td>${esc(l.received_date)}</td><td>${l.purchase_no ? esc(l.purchase_no) : '<span class="tag">期初庫存</span>'}</td><td>${esc(l.storage_location)}</td>
             <td class="num">${fmt(l.unit_cost, 2)}</td><td class="num">${kg(l.opening_qty)}</td>${inCell(l.in_qty)}${outCell(l.out_qty)}
             <td class="num">${kg(l.closing_qty)}</td><td class="num">${money(l.closing_amount)}</td><td><span class="tag">${l.status}</span></td></tr>`).join('')}`).join('')}
         <tr class="total"><td>合計</td><td></td><td></td><td></td><td></td><td class="num">${kg(total.opening_qty)}</td>${inCell(total.in_qty)}${outCell(total.out_qty)}
@@ -468,7 +469,7 @@ async function pageStockPackaging() {
       <label>迄日<input type="date" id="to" value="${today()}"></label>
       <button id="search">查詢</button>
     </div>
-    <p class="hint">點任一列可看異動明細。目前只有進貨入庫；包裝耗用於 Phase 4（配方）加入。</p>
+    <p class="hint">點任一列可看異動明細。目前只有進貨入庫與期初；包裝耗用於 Phase 4（配方）加入。開帳時手上已有的包材請到 <a href="#opening-stock">期初庫存</a> 登錄。</p>
     <div class="card"><div class="table-wrap" id="list"></div></div>`;
   const load = async () => {
     try {
@@ -899,12 +900,108 @@ async function pageStockRoasted() {
   load();
 }
 
+// ---------------------------------------------------------------- 期初庫存
+async function pageOpening() {
+  $('#main').innerHTML = `
+    <h2>期初庫存</h2>
+    <div class="toolbar">
+      <span class="spacer"></span>
+      <button id="addBean" class="primary">＋ 新增生豆期初</button>
+      <button id="addPack" class="primary">＋ 新增包材期初</button>
+    </div>
+    <p class="hint">開始使用系統時手上已有的生豆、包材在這裡登錄，不經過進貨單（不算進貨金額、不產生應付帳款）。
+      庫存查詢的「期初」是起日之前所有異動的加總，所以<b>期初日期請填開帳日的前一天</b>（例如 11/1 開始記帳就填 10/31），查詢 11/1 之後的區間時這些數量就會出現在「期初」欄。
+      生豆期初批號被烘焙使用後會鎖定。點任一列可修改。</p>
+    <div class="stats" id="stats"></div>
+    <div class="section-title">生豆</div>
+    <div class="card"><div class="table-wrap" id="beans"></div></div>
+    <div class="section-title">包材</div>
+    <div class="card"><div class="table-wrap" id="packs"></div></div>`;
+
+  const load = async () => {
+    try {
+      const { beans, packaging, summary } = await api('/opening-stock');
+      $('#stats').innerHTML = [['生豆期初 kg', '+' + kg(summary.bean_kg)], ['生豆期初金額', money(summary.bean_amount)], ['包材期初金額', money(summary.packaging_amount)]]
+        .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+      $('#beans').innerHTML = beans.length ? `<table><thead><tr><th>期初日期</th><th>批號</th><th>生豆品項</th><th class="num">期初 kg</th><th class="num">成本/kg</th><th class="num">金額</th><th class="num">目前剩餘 kg</th><th>位置</th><th>備註</th><th>狀態</th></tr></thead><tbody>
+        ${beans.map((b) => `<tr class="clickable" data-id="${b.lot_id}"><td>${esc(b.received_date)}</td><td>${esc(b.lot_no)}</td><td>${esc(b.bean_name)}</td>
+          <td class="num up">+${kg(b.initial_kg)}</td><td class="num">${fmt(b.unit_cost, 2)}</td><td class="num">${money(b.amount)}</td><td class="num">${kg(b.current_kg)}</td>
+          <td>${esc(b.storage_location)}</td><td>${esc(b.note)}</td><td>${b.locked ? '<span class="tag warn">已使用，鎖定</span>' : '<span class="tag">可修改</span>'}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">還沒有生豆期初庫存</div>';
+      $('#packs').innerHTML = packaging.length ? `<table><thead><tr><th>期初日期</th><th>包材</th><th class="num">期初數量</th><th>單位</th><th class="num">單價</th><th class="num">金額</th><th>備註</th></tr></thead><tbody>
+        ${packaging.map((p) => `<tr class="clickable" data-id="${p.movement_id}"><td>${esc(p.date)}</td><td>${esc(p.packaging_name)}</td>
+          <td class="num up">+${fmt(p.qty)}</td><td>${esc(p.unit)}</td><td class="num">${fmt(p.unit_cost, 2)}</td><td class="num">${money(p.amount)}</td><td>${esc(p.note)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">還沒有包材期初庫存</div>';
+      $$('#beans tr.clickable').forEach((tr) => tr.onclick = () => openingForm('生豆', beans.find((b) => b.lot_id === Number(tr.dataset.id)), load));
+      $$('#packs tr.clickable').forEach((tr) => tr.onclick = () => openingForm('包材', packaging.find((p) => p.movement_id === Number(tr.dataset.id)), load));
+    } catch (e) { fail(e); }
+  };
+  $('#addBean').onclick = () => openingForm('生豆', null, load);
+  $('#addPack').onclick = () => openingForm('包材', null, load);
+  load();
+}
+
+async function openingForm(type, row, reload) {
+  try {
+    const isBean = type === '生豆';
+    const master = await lookup(isBean ? 'green-beans' : 'packaging-items', true);
+    const id = row ? (isBean ? 'g' + row.lot_id : 'p' + row.movement_id) : null;
+    const locked = !!row?.locked;
+    const dis = locked ? 'disabled' : '';
+    const r = row || {};
+    const box = openModal(`
+      <h2>${row ? '修改' : '新增'}${type}期初庫存</h2>
+      ${locked ? '<div class="notice">此批號已被使用（烘焙投入等），只能檢視，無法修改或刪除。</div>' : ''}
+      <form id="f">
+        <div class="form-grid">
+          <label>期初日期 *<input name="date" type="date" required value="${esc(isBean ? r.received_date : r.date) || today()}" ${dis}></label>
+          ${isBean
+            ? `<label>生豆品項 *<select name="bean_id" required ${dis}>${options(master, 'bean_id', r.bean_id, { blank: '請選擇' })}</select></label>
+               <label>批號<input name="lot_no" value="${esc(r.lot_no)}" placeholder="自動產生" ${dis}></label>`
+            : `<label>包材 *<select name="packaging_id" required ${dis}>${options(master, 'packaging_id', r.packaging_id, { blank: '請選擇', label: (k) => `${k.name}（${k.unit}）` })}</select></label>`}
+          <label>${isBean ? '數量（kg）' : '數量'} *<input name="qty" type="number" step="any" min="0" required value="${esc(isBean ? r.initial_kg : r.qty)}" ${dis}></label>
+          <label>${isBean ? '每 kg 成本' : '單價'}<input name="unit_cost" type="number" step="any" min="0" value="${esc(r.unit_cost)}" ${dis}></label>
+          <label>金額<input id="amt" disabled></label>
+          ${isBean ? `<label>存放位置<input name="storage_location" value="${esc(r.storage_location)}" ${dis}></label>` : ''}
+          <label class="full">備註<input name="note" value="${esc(r.note)}" ${dis}></label>
+        </div>
+        <p class="hint">期初日期請填開帳日的前一天。${isBean ? '每 kg 成本會帶入之後的烘焙成本，請填當初的進貨成本（含運費、稅）。' : ''}</p>
+        <div class="form-actions">
+          ${row && !locked ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">${locked ? '關閉' : '取消'}</button>${locked ? '' : '<button class="primary">存檔</button>'}
+        </div>
+      </form>`);
+    const f = $('#f', box);
+    const calc = () => { $('#amt', box).value = money(r2((Number(f.qty.value) || 0) * (Number(f.unit_cost.value) || 0))); };
+    f.qty.oninput = f.unit_cost.oninput = calc;
+    if (!isBean) f.packaging_id.onchange = () => { // 帶入包材參考單價
+      const k = master.find((x) => x.packaging_id === Number(f.packaging_id.value));
+      if (k?.unit_cost != null && !f.unit_cost.value) { f.unit_cost.value = k.unit_cost; calc(); }
+    };
+    calc();
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { ...Object.fromEntries(new FormData(f)), item_type: type };
+      try {
+        await api(id ? `/opening-stock/${id}` : '/opening-stock', { method: id ? 'PUT' : 'POST', body });
+        closeModal(); toast('已存檔'); reload();
+      } catch (err) { fail(err); }
+    };
+    if (row && !locked) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除這筆${type}期初庫存？無法復原。`)) return;
+      try { await api(`/opening-stock/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
 // ---------------------------------------------------------------- 路由
 const ROUTES = {
   purchases: pagePurchases,
   sales: pageSales,
   'customer-history': pageCustomerHistory,
   roasts: pageRoasts,
+  'opening-stock': pageOpening,
   'stock-beans': pageStockBeans,
   'stock-roasted': pageStockRoasted,
   'stock-packaging': pageStockPackaging,
