@@ -1,4 +1,4 @@
-// 咖啡烘豆進銷存 — 後台管理（Phase 1～4）
+// 咖啡烘豆進銷存 — 後台管理（Phase 1～5）
 // 純 JavaScript，無建置步驟。顏色慣例：紅 = 增加／入庫，綠 = 減少／出庫。
 'use strict';
 
@@ -24,6 +24,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     const err = new Error(data?.error || `發生錯誤（${res.status}）`);
     err.status = res.status;
+    err.data = data;
     err.detail = data?.detail ?? null; // 例：銷貨熟豆不足 { code: 'SHORTAGE', shortages }
     throw err;
   }
@@ -1100,11 +1101,11 @@ async function pageBank() {
         ...(acc ? [['期末餘額', money(summary.closing_balance)]] : [['筆數', fmt(summary.count)]]),
       ]);
       const showBal = acc && summary.running_balance;
-      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>帳戶</th><th>類別</th><th>對象</th><th>摘要</th><th class="num">入帳</th><th class="num">出帳</th>${showBal ? '<th class="num">餘額</th>' : ''}<th>沖銷單據</th></tr></thead><tbody>
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>帳戶</th><th>類別</th><th>對象</th><th>摘要</th><th class="num">入帳</th><th class="num">出帳</th>${showBal ? '<th class="num">餘額</th>' : ''}<th>沖銷單據</th><th>對帳</th></tr></thead><tbody>
         ${data.map((r) => `<tr class="clickable" data-id="${r.txn_id}"><td>${esc(r.txn_date)}</td><td>${esc(r.txn_no)}</td><td>${esc(r.account_name)}</td><td>${esc(r.category)}</td>
           <td>${r.category === '轉帳' ? (r.direction === DIR_OUT ? '→ ' : '← ') + esc(r.transfer_account_name) : esc(r.counterparty)}</td><td>${esc(r.description)}</td>
           ${r.direction === DIR_IN ? inAmt(r.amount) + '<td></td>' : '<td></td>' + outAmt(r.amount)}${showBal ? `<td class="num">${money(r.balance)}</td>` : ''}
-          <td>${esc(r.doc_nos)}${['銷貨收款', '進貨付款', '費用'].includes(r.category) && r.unallocated > 0.005 ? ` <span class="tag warn">未沖 ${money(r.unallocated)}</span>` : ''}</td></tr>`).join('')}
+          <td>${esc(r.doc_nos)}${['銷貨收款', '進貨付款', '費用'].includes(r.category) && r.unallocated > 0.005 ? ` <span class="tag warn">未沖 ${money(r.unallocated)}</span>` : ''}</td><td>${r.reconciled ? '✓' : ''}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">此區間沒有收支</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => txnForm(null, Number(tr.dataset.id), load));
     } catch (e) { fail(e); }
@@ -1129,6 +1130,7 @@ async function txnForm(direction, id, reload, preset = {}) {
 
     const box = openModal(`
       <h2>${id ? `${esc(t.txn_no)}（${direction}）` : `新增${direction}`}</h2>
+      ${t.reconciled ? '<div class="notice">這筆已對帳，不能改帳戶、日期、金額或刪除（沖帳、摘要仍可改）；要改請先到「銀行對帳」取消對帳。</div>' : ''}
       <form id="f">
         <div class="form-grid">
           <label>帳戶 *<select name="account_id" required>${options(accounts, 'account_id', t.account_id, { blank: '請選擇', label: (a) => a.account_name })}</select></label>
@@ -1979,6 +1981,729 @@ async function recipeForm(productId, reload) {
   } catch (e) { fail(e); }
 }
 
+// ---------------------------------------------------------------- Phase 5 共用：權限、Excel
+let ME = null; // /api/me：email、role、read、write、modules
+const ROUTE_RES = {
+  purchases: 'purchases', sales: 'sales', 'customer-history': 'sales', returns: 'returns', subscriptions: 'subscriptions', invoices: 'invoices',
+  roasts: 'roast-batches', 'stock-beans': 'inventory', 'stock-roasted': 'inventory', 'stock-packaging': 'inventory', 'stock-counts': 'stock-counts', 'opening-stock': 'opening-stock',
+  bank: 'bank-transactions', expenses: 'expenses', receivables: 'finance', payables: 'finance', 'expense-summary': 'finance', reconcile: 'reconcile',
+  recipes: 'recipes', 'rpt-profit': 'reports', 'rpt-pnl': 'reports', 'rpt-loss': 'reports', 'rpt-trace': 'reports', 'rpt-stock': 'inventory', 'rpt-processing': 'reports',
+  users: 'users', audit: 'audit-logs', data: 'backup',
+};
+const canRead = (routeKey) => {
+  if (!ME) return true;
+  const res = ROUTE_RES[routeKey] || routeKey;
+  const mod = ME.modules[res];
+  return !mod || ME.read.includes(mod);
+};
+const canWriteRes = (res) => !ME || !ME.modules[res] || ME.write.includes(ME.modules[res]);
+
+let excelLoading = null;
+function loadExcel() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  excelLoading ||= new Promise((ok, bad) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/exceljs.min.js';
+    s.onload = () => ok(window.ExcelJS);
+    s.onerror = () => bad(new Error('Excel 元件載入失敗，請重新整理頁面'));
+    document.head.appendChild(s);
+  });
+  return excelLoading;
+}
+async function downloadWorkbook(wb, filename) {
+  const buf = await wb.xlsx.writeBuffer();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+/** 把畫面上的數字字串轉回數字（1,234／+12.5／−300／15.2%） */
+function cellValue(text) {
+  const t = text.replace(/\s+/g, ' ').trim();
+  const m = t.match(/^([+\-−])?([\d,]+(?:\.\d+)?)(%)?$/);
+  if (!m) return { v: t };
+  let n = Number(m[2].replace(/,/g, ''));
+  if (m[1] === '-' || m[1] === '−') n = -n;
+  return m[3] ? { v: n / 100, fmt: '0.0%' } : { v: n, fmt: Number.isInteger(n) ? '#,##0' : '#,##0.00' };
+}
+const sheetName = (s, used) => {
+  let n = (s || '工作表').replace(/[\\/?*[\]:]/g, ' ').trim().slice(0, 28) || '工作表';
+  let k = n; let i = 2;
+  while (used.has(k)) k = `${n}${i++}`;
+  used.add(k); return k;
+};
+function addAoaSheet(wb, name, rows, used) {
+  const ws = wb.addWorksheet(sheetName(name, used));
+  rows.forEach((r, i) => {
+    const row = ws.addRow(r.map((c) => (c && typeof c === 'object' && 'v' in c ? c.v : c)));
+    r.forEach((c, j) => { if (c && typeof c === 'object' && c.fmt) row.getCell(j + 1).numFmt = c.fmt; });
+    if (i === 0) row.font = { bold: true };
+  });
+  ws.columns.forEach((col) => {
+    let w = 8;
+    col.eachCell({ includeEmpty: false }, (cell) => { w = Math.max(w, String(cell.value ?? '').replace(/[^\x00-\xff]/g, 'xx').length + 2); });
+    col.width = Math.min(w, 60);
+  });
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  return ws;
+}
+/** 匯出目前頁面上所有表格（每個表格一個工作表，依上方的區段標題命名） */
+async function exportPage() {
+  try {
+    const ExcelJS = await loadExcel();
+    const wb = new ExcelJS.Workbook();
+    const used = new Set();
+    const title = $('#main h2')?.textContent.trim() || '匯出';
+    const filters = $$('#main .toolbar label').map((l) => {
+      const el = $('input,select', l);
+      const v = el?.tagName === 'SELECT' ? el.options[el.selectedIndex]?.text : el?.value;
+      return v ? `${l.firstChild.textContent.trim()}：${v}` : null;
+    }).filter(Boolean).join('　');
+    $$('#main table').forEach((tb, i) => {
+      if (tb.closest('#modal')) return;
+      let label = title;
+      for (let el = tb.closest('.card, .table-wrap'); el; el = el.previousElementSibling) {
+        if (el.classList?.contains('section-title')) { label = el.textContent.trim(); break; }
+      }
+      const rows = $$('tr', tb).map((tr) => $$('th,td', tr).filter((c) => !c.querySelector('input[type=checkbox]') || c.textContent.trim())
+        .map((c) => {
+          const inp = $('input:not([type=checkbox]),select', c);
+          return cellValue(inp ? (inp.tagName === 'SELECT' ? inp.options[inp.selectedIndex]?.text || '' : inp.value) : c.textContent.replace(/^[▸▾]\s*/, ''));
+        }));
+      if (rows.length) addAoaSheet(wb, i === 0 ? title : label, rows, used);
+    });
+    if (!wb.worksheets.length) return toast('這一頁沒有可匯出的表格', true);
+    if (filters) wb.worksheets[0].spliceRows(1, 0, [filters], []); // 第一張表上方註明篩選條件
+    await downloadWorkbook(wb, `${title}_${today()}.xlsx`);
+  } catch (e) { fail(e); }
+}
+/** 每次換頁後，在有表格的頁面工具列加上「匯出 Excel」 */
+function addExportButton() {
+  const tb = $('#main .toolbar');
+  if (!tb || $('#exportBtn')) return;
+  const b = document.createElement('button');
+  b.id = 'exportBtn'; b.type = 'button'; b.textContent = '⬇ 匯出 Excel';
+  b.onclick = exportPage;
+  const sp = $('.spacer', tb);
+  sp ? sp.after(b) : tb.appendChild(b);
+}
+
+// ---------------------------------------------------------------- 報表：毛利分析
+const pctCell = (r) => `<td class="num">${r === null || r === undefined ? '' : pct(r)}</td>`;
+const signCell = (n) => `<td class="num ${n > 0 ? 'up' : n < 0 ? 'down' : ''}">${money(n)}</td>`;
+
+async function pageProfit() {
+  $('#main').innerHTML = `
+    <h2>毛利分析</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>分組<select id="group"><option value="product">產品</option><option value="customer">客戶</option><option value="channel">通路</option><option value="roasted_bean">熟豆品項</option><option value="month">月份</option></select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+    </div>
+    <p class="hint">營收 = 明細金額扣掉整單折扣（不含運費）；退貨折讓依退貨日計入。成本 = 熟豆＋包材（銷貨當下成本，扣掉退回回補）。
+      <b>加工成本</b> = 出貨熟豆 kg × 該批烘焙月份的每 kg 加工成本（勾選「攤入烘焙」的費用 ÷ 當月烘焙產出 kg，見 <a href="#rpt-processing">加工成本</a>），只在報表中攤提，不改已存檔的成本。<span class="up">紅色 = 獲利</span>、<span class="down">綠色 = 虧損</span>。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, total } = await api('/reports/profit' + qs({ from: $('#from').value, to: $('#to').value, group: $('#group').value }));
+      $('#stats').innerHTML = statCards([['淨營收', money(total.net_revenue)], ['成本（豆＋包材）', money(total.cost)], ['毛利', money(total.gross), total.gross >= 0 ? 'up' : 'down'], ['毛利率', pct(total.margin) || '—'],
+        ['加工成本', money(total.processing)], ['調整後毛利', money(total.adj_gross), total.adj_gross >= 0 ? 'up' : 'down'], ['調整後毛利率', pct(total.adj_margin) || '—']]);
+      const row = (r, cls = '') => `<tr class="${cls}"><td>${esc(r.label)}</td><td class="num">${fmt(r.qty)}</td><td class="num">${money(r.revenue)}</td><td class="num">${r.returns ? '−' + money(r.returns) : ''}</td>
+        <td class="num"><b>${money(r.net_revenue)}</b></td><td class="num">${money(r.cost)}</td><td class="num">${money(r.packaging)}</td>${signCell(r.gross)}${pctCell(r.margin)}
+        <td class="num">${money(r.processing)}</td>${signCell(r.adj_gross)}${pctCell(r.adj_margin)}</tr>`;
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>${esc($('#group').selectedOptions[0].text)}</th><th class="num">數量</th><th class="num">營收</th><th class="num">退貨折讓</th><th class="num">淨營收</th>
+        <th class="num">成本</th><th class="num">其中包材</th><th class="num">毛利</th><th class="num">毛利率</th><th class="num">加工成本</th><th class="num">調整後毛利</th><th class="num">調整後毛利率</th></tr></thead>
+        <tbody>${data.map((r) => row(r)).join('')}${row(total, 'total')}</tbody></table>` : '<div class="empty">此區間沒有銷貨</div>';
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#group').onchange = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 報表：損益概要
+async function pagePnl() {
+  $('#main').innerHTML = `
+    <h2>損益概要</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${today().slice(0, 4)}-01-01"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>期間<select id="period"><option value="month">月</option><option value="quarter">季</option><option value="year">年</option></select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+    </div>
+    <p class="hint">權責基礎（依單據日期，不看有沒有收付款）。營業收入 = 銷貨（扣折扣）＋ 運費 − 退貨折讓；銷貨成本 = 熟豆＋包材成本 − 退回回補；
+      營業費用含「攤入烘焙」的費用（損益表不再另外攤加工成本，避免重複）；庫存損耗 = 盤虧／試喝／樣品／報廢 − 盤盈。<span class="up">紅色 = 獲利</span>、<span class="down">綠色 = 虧損</span>。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, total, categories } = await api('/reports/pnl' + qs({ from: $('#from').value, to: $('#to').value, period: $('#period').value }));
+      $('#stats').innerHTML = statCards([['營業收入', money(total.revenue)], ['銷貨毛利', money(total.gross), total.gross >= 0 ? 'up' : 'down'], ['毛利率', pct(total.gross_margin) || '—'],
+        ['營業費用', money(total.expenses)], ['本期淨利', money(total.net), total.net >= 0 ? 'up' : 'down'], ['淨利率', pct(total.net_margin) || '—']]);
+      if (!data.length) { $('#list').innerHTML = '<div class="empty">此區間沒有資料</div>'; return; }
+      const cols = [...data, total];
+      const line = (label, f, opt = {}) => `<tr class="${opt.cls || ''}"><td>${opt.indent ? '　' : ''}${label}</td>${cols.map((c) => {
+        const v = f(c);
+        if (opt.pct) return pctCell(v);
+        if (opt.sign) return signCell(v);
+        return `<td class="num">${v ? money(v) : ''}</td>`;
+      }).join('')}</tr>`;
+      $('#list').innerHTML = `<table><thead><tr><th>項目</th>${cols.map((c) => `<th class="num">${esc(c.period)}</th>`).join('')}</tr></thead><tbody>
+        ${line('銷貨收入（扣折扣）', (c) => c.sales)}${line('運費收入', (c) => c.shipping)}${line('銷貨退回／折讓', (c) => -c.returns)}
+        ${line('營業收入', (c) => c.revenue, { cls: 'total' })}
+        ${line('銷貨成本', (c) => c.cogs, { indent: true })}${line('退回回補成本', (c) => -c.restock_cost, { indent: true })}
+        ${line('銷貨毛利', (c) => c.gross, { cls: 'total', sign: true })}${line('毛利率', (c) => c.gross_margin, { pct: true })}
+        ${categories.map((n) => line(n, (c) => c.by_category[n] || 0, { indent: true })).join('')}
+        ${line('營業費用合計', (c) => c.expenses)}${line('　其中攤入烘焙', (c) => c.roast_expenses, { indent: true })}
+        ${line('庫存損耗', (c) => c.inv_loss)}
+        ${line('本期淨利', (c) => c.net, { cls: 'total', sign: true })}${line('淨利率', (c) => c.net_margin, { pct: true })}
+        </tbody></table>`;
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#period').onchange = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 報表：失重率分析
+async function pageLoss() {
+  $('#main').innerHTML = `
+    <h2>失重率分析</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${today().slice(0, 4)}-01-01"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>依<select id="by"><option value="green">生豆品項</option><option value="roasted">熟豆品項</option></select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+    </div>
+    <p class="hint">失重率 =（投入 − 產出）÷ 投入，依投入 kg 加權平均。一個批次投入多種生豆（綜合豆）時，批次失重率套用到每一種生豆。超出 10%～25% 標示提醒。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, months, total } = await api('/reports/loss' + qs({ from: $('#from').value, to: $('#to').value, by: $('#by').value }));
+      $('#stats').innerHTML = statCards([['投入 kg', '−' + kg(total.input_kg), 'down'], ['產出 kg', '+' + kg(total.output_kg), 'up'], ['平均失重率', pct(total.loss_rate) || '—']]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>品項</th><th class="num">批次</th><th class="num">投入 kg</th><th class="num">產出 kg</th><th class="num">平均失重率</th><th class="num">最低</th><th class="num">最高</th>
+        ${months.map((m) => `<th class="num">${m}</th>`).join('')}</tr></thead><tbody>
+        ${data.map((r) => `<tr><td>${esc(r.name)}</td><td class="num">${r.batches}</td><td class="num">${kg(r.input_kg)}</td><td class="num">${kg(r.output_kg)}</td><td class="num"><b>${lossTag(r.loss_rate)}</b></td>
+          <td class="num">${pct(r.min_rate)}</td><td class="num">${pct(r.max_rate)}</td>${months.map((m) => `<td class="num">${r.months[m] ? lossTag(r.months[m].loss_rate) : ''}</td>`).join('')}</tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有烘焙批次</div>';
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#by').onchange = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 報表：批號追溯
+async function pageTrace() {
+  const [green, roasted] = await Promise.all([api('/inventory/green-beans?show_empty=1'), api('/inventory/roasted?show_empty=1')]);
+  const gOpts = green.data.flatMap((b) => b.lots.map((l) => `<option value="g${l.lot_id}">${esc(l.lot_no)}｜${esc(b.name)}｜剩 ${kg(l.closing_qty)} kg</option>`)).join('');
+  const rOpts = roasted.data.flatMap((b) => b.lots.map((l) => `<option value="r${l.roasted_lot_id}">${esc(l.batch_no)}｜${esc(b.name)}｜${esc(l.roast_date)}｜剩 ${kg(l.closing_qty)} kg</option>`)).join('');
+  $('#main').innerHTML = `
+    <h2>批號追溯</h2>
+    <div class="toolbar">
+      <label>批號<select id="lot"><option value="">請選擇</option><optgroup label="生豆批號">${gOpts}</optgroup><optgroup label="熟豆批次（烘焙批次）">${rOpts}</optgroup></select></label>
+      <span class="spacer"></span>
+    </div>
+    <p class="hint">生豆批號：進貨來源 → 用在哪些烘焙批次 → 熟豆賣給哪些客戶。熟豆批次：用了哪些生豆（來自哪個供應商）→ 賣給哪些客戶。可用於品質問題追查或回收通知。</p>
+    <div id="out"></div>`;
+  const outTable = (rows) => (rows.length ? `<div class="table-wrap"><table><thead><tr><th>日期</th><th>類型</th><th>單號</th><th>客戶</th><th class="num">kg</th></tr></thead><tbody>
+    ${rows.map((o) => `<tr><td>${esc(o.movement_date.slice(0, 10))}</td><td>${esc(o.movement_type)}</td><td>${esc(o.doc_no)}</td><td>${esc(o.customer_name)}</td>
+      <td class="num ${o.qty > 0 ? 'up' : 'down'}">${o.qty > 0 ? '+' : ''}${kg(o.qty)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="hint">尚無出庫紀錄。</p>');
+  $('#lot').onchange = async () => {
+    const v = $('#lot').value;
+    if (!v) { $('#out').innerHTML = ''; return; }
+    try {
+      const d = await api('/reports/trace' + qs(v[0] === 'g' ? { lot_id: v.slice(1) } : { roasted_lot_id: v.slice(1) }));
+      if (d.type === 'green') {
+        const l = d.lot;
+        $('#out').innerHTML = `
+          <div class="stats">${statCards([['生豆批號', esc(l.lot_no)], ['品項', esc(l.bean_name)], ['來源', l.purchase_no ? `${esc(l.supplier_name)}（${esc(l.purchase_no)}）` : '期初庫存'], ['入庫', `${esc(l.received_date)}／${kg(l.initial_kg)} kg`], ['目前剩餘', kg(l.current_kg) + ' kg'], ['出貨客戶數', d.customers.length]])}</div>
+          ${d.customers.length ? `<p class="hint">曾收到這批豆子的客戶：${d.customers.map(esc).join('、')}</p>` : ''}
+          ${d.batches.map((b) => `<div class="section-title">烘焙批次 ${esc(b.batch_no)}（${esc(b.roast_date)}，${esc(b.roasted_bean_name)}）</div>
+            <p class="hint">投入本批號 ${kg(b.input_kg)} kg，佔該批次 ${pct(b.share)}；產出 ${kg(b.output_kg)} kg，失重率 ${pct(b.loss_rate)}，熟豆剩 ${kg(b.current_kg)} kg</p>
+            <div class="card">${outTable(b.outflows)}</div>`).join('') || '<p class="hint">這批生豆還沒有烘焙紀錄。</p>'}
+          ${d.movements.length > 1 ? `<div class="section-title">生豆其他異動</div><div class="card"><div class="table-wrap"><table><thead><tr><th>日期</th><th>類型</th><th class="num">kg</th><th>備註</th></tr></thead><tbody>
+            ${d.movements.map((m) => `<tr><td>${esc(m.movement_date.slice(0, 10))}</td><td>${esc(m.movement_type)}</td><td class="num ${m.qty > 0 ? 'up' : 'down'}">${kg(m.qty)}</td><td>${esc(m.note)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
+      } else {
+        const l = d.lot;
+        $('#out').innerHTML = `
+          <div class="stats">${statCards([['熟豆批次', esc(l.batch_no)], ['熟豆品項', esc(l.roasted_bean_name)], ['烘焙日', esc(l.roast_date)], ['產出', kg(l.output_kg) + ' kg'], ['失重率', pct(l.loss_rate)], ['目前剩餘', kg(l.current_kg) + ' kg']])}</div>
+          <div class="section-title">投入生豆</div><div class="card"><div class="table-wrap"><table><thead><tr><th>生豆批號</th><th>品項</th><th>來源</th><th>入庫日</th><th class="num">投入 kg</th></tr></thead><tbody>
+            ${d.inputs.map((i) => `<tr><td>${esc(i.lot_no)}</td><td>${esc(i.bean_name)}</td><td>${i.purchase_no ? `${esc(i.supplier_name)}（${esc(i.purchase_no)}）` : '期初庫存'}</td><td>${esc(i.received_date)}</td><td class="num">${kg(i.input_kg)}</td></tr>`).join('')}</tbody></table></div></div>
+          <div class="section-title">出庫紀錄${d.customers.length ? `（客戶：${d.customers.map(esc).join('、')}）` : ''}</div><div class="card">${outTable(d.outflows)}</div>`;
+      }
+    } catch (e) { fail(e); }
+  };
+}
+
+// ---------------------------------------------------------------- 報表：庫存現況
+async function pageStockNow() {
+  $('#main').innerHTML = `
+    <h2>庫存現況</h2>
+    <div class="toolbar"><label>截止日<input type="date" id="asof" value="${today()}"></label><button id="search">查詢</button><span class="spacer"></span></div>
+    <p class="hint">截止日當天結束時的生豆、熟豆、包材數量與金額（依各批號成本；包材依進貨成本）。</p>
+    <div class="stats" id="stats"></div>
+    <div class="section-title">生豆</div><div class="card"><div class="table-wrap" id="g"></div></div>
+    <div class="section-title">熟豆</div><div class="card"><div class="table-wrap" id="r"></div></div>
+    <div class="section-title">包材</div><div class="card"><div class="table-wrap" id="p"></div></div>`;
+  const load = async () => {
+    try {
+      const to = $('#asof').value;
+      const [g, r, p] = await Promise.all([api('/inventory/green-beans' + qs({ to })), api('/inventory/roasted' + qs({ to })), api('/inventory/packaging' + qs({ to }))]);
+      const tbl = (rows, unit, low) => (rows.length ? `<table><thead><tr><th>品項</th><th class="num">數量（${unit}）</th><th class="num">金額</th><th class="num">平均成本</th><th>狀態</th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.name)}</td><td class="num">${unit === 'kg' ? kg(x.closing_qty) : fmt(x.closing_qty)}</td><td class="num">${money(x.closing_amount)}</td>
+          <td class="num">${x.closing_qty > 0 ? fmt(x.closing_amount / x.closing_qty, 2) : ''}</td><td>${low(x) ? '<span class="tag warn">低於安全庫存</span>' : ''}</td></tr>`).join('')}
+        <tr class="total"><td>合計</td><td></td><td class="num">${money(rows.reduce((s, x) => s + x.closing_amount, 0))}</td><td></td><td></td></tr></tbody></table>` : '<div class="empty">沒有庫存</div>');
+      const gr = g.data.filter((x) => Math.abs(x.closing_qty) > 0.0005);
+      const rr = r.data.filter((x) => Math.abs(x.closing_qty) > 0.0005);
+      const pr = p.data.filter((x) => Math.abs(x.closing_qty) > 0.0005);
+      const sum = (rows) => rows.reduce((s, x) => s + x.closing_amount, 0);
+      $('#stats').innerHTML = statCards([['生豆', `${kg(gr.reduce((s, x) => s + x.closing_qty, 0))} kg／${money(sum(gr))}`], ['熟豆', `${kg(rr.reduce((s, x) => s + x.closing_qty, 0))} kg／${money(sum(rr))}`], ['包材', money(sum(pr))], ['庫存總額', money(sum(gr) + sum(rr) + sum(pr))]]);
+      $('#g').innerHTML = tbl(gr, 'kg', (x) => x.low_stock);
+      $('#r').innerHTML = tbl(rr, 'kg', (x) => x.low_stock);
+      $('#p').innerHTML = tbl(pr, '單位', (x) => x.low_stock);
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 報表：加工成本
+async function pageProcessing() {
+  $('#main').innerHTML = `
+    <h2>加工成本（費用攤提）</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${today().slice(0, 4)}-01-01"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+    </div>
+    <p class="hint">每月勾選「攤入烘焙成本」的費用（例：瓦斯、電費）÷ 當月烘焙產出 kg = 當月每 kg 加工成本。毛利分析會用出貨熟豆的烘焙月份套用這個費率。
+      當月沒有烘焙產出時費用無法攤提，列為「未攤提」。要攤入哪些費用，請在費用支出或費用類別勾選「攤入烘焙」。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, total } = await api('/reports/processing' + qs({ from: $('#from').value, to: $('#to').value }));
+      $('#stats').innerHTML = statCards([['攤入烘焙費用', money(total.expense)], ['烘焙產出 kg', kg(total.output_kg)], ['平均每 kg', total.output_kg ? fmt(total.expense / total.output_kg, 2) : '—'], ['未攤提', money(total.unallocated)]]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>月份</th><th class="num">費用筆數</th><th class="num">攤入烘焙費用</th><th class="num">烘焙批次</th><th class="num">產出 kg</th><th class="num">每 kg 加工成本</th><th>狀態</th></tr></thead><tbody>
+        ${data.map((r) => `<tr><td>${esc(r.ym)}</td><td class="num">${r.expense_count}</td><td class="num">${money(r.expense)}</td><td class="num">${r.batches}</td><td class="num">${kg(r.output_kg)}</td>
+          <td class="num"><b>${r.rate === null ? '—' : fmt(r.rate, 2)}</b></td><td>${r.unallocated ? `<span class="tag warn">未攤提 ${money(r.unallocated)}</span>` : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">此區間沒有資料</div>';
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  load();
+}
+
+// ---------------------------------------------------------------- 銀行對帳
+function parseCsv(text) {
+  const rows = []; let row = []; let cell = ''; let q = false;
+  const delim = (text.split('\n')[0].match(/\t/g) || []).length > (text.split('\n')[0].match(/,/g) || []).length ? '\t' : ',';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim()));
+}
+async function readTextFile(file) {
+  const buf = await file.arrayBuffer();
+  const utf = new TextDecoder('utf-8').decode(buf);
+  if (!utf.includes('�')) return utf.replace(/^﻿/, '');
+  try { return new TextDecoder('big5').decode(buf); } catch { return utf; } // 台灣網銀常見 Big5
+}
+/** 日期：2026/11/05、2026-11-05、20261105、115/11/05（民國） */
+function parseDate(s) {
+  const t = String(s || '').trim().replace(/\s.*$/, '');
+  let m = t.match(/^(\d{2,4})[/.\-年](\d{1,2})[/.\-月](\d{1,2})/) || t.match(/^(\d{4})(\d{2})(\d{2})$/) || t.match(/^(\d{3})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  let y = Number(m[1]);
+  if (y < 1000) y += 1911;
+  const d = `${y}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+}
+const parseNum = (s) => {
+  const t = String(s ?? '').replace(/[,\s$元NT]/g, '');
+  if (!t || t === '-') return null;
+  const neg = /^\(.*\)$/.test(t) || /^-/.test(t);
+  const n = Number(t.replace(/[()+-]/g, ''));
+  return Number.isFinite(n) ? (neg ? -n : n) : null;
+};
+
+async function pageReconcile() {
+  const accounts = await lookup('bank-accounts', true);
+  $('#main').innerHTML = `
+    <h2>銀行對帳</h2>
+    <div class="acct-strip" id="ovw"></div>
+    <div class="toolbar">
+      <label>帳戶<select id="acc">${options(accounts.filter((a) => a.is_active), 'account_id', null, { blank: '請選擇', label: (a) => a.account_name })}</select></label>
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="upload" class="primary">⬆ 匯入對帳單 CSV</button><input type="file" id="file" accept=".csv,.txt,.tsv" hidden>
+    </div>
+    <p class="hint">從網銀下載交易明細 CSV 匯入（支援 UTF-8 與 Big5、民國年日期），第一次匯入時設定欄位對應，之後同一帳戶會自動套用。系統會依「同方向、同金額、日期相差 5 天內」建議配對，確認後兩邊都標記已對帳；
+      已對帳的收支不能再改金額、日期或刪除。對帳單上有、系統沒有的明細可直接「建立收支」。現金等沒有對帳單的帳戶，可在右側直接「標記已核對」。</p>
+    <div class="stats" id="stats"></div>
+    <div id="work"></div>`;
+  const loadOverview = async () => {
+    const { data } = await api('/reconcile');
+    $('#ovw').innerHTML = data.map((a) => `<div class="acct" data-id="${a.account_id}"><div class="k">${esc(a.account_name)}</div>
+      <div class="v" style="font-size:14px">${a.open_lines ? `<span class="down">${a.open_lines} 筆待對</span>` : '✓'}　未核收支 ${a.open_txns}</div>
+      <div class="k">對帳至 ${esc(a.last_reconciled_date || '—')}</div></div>`).join('');
+    $$('#ovw .acct').forEach((el) => el.onclick = () => { $('#acc').value = el.dataset.id; load(); });
+  };
+  const load = async () => {
+    loadOverview().catch(() => {});
+    const aid = $('#acc').value;
+    if (!aid) { $('#work').innerHTML = '<div class="empty">請選擇帳戶</div>'; $('#stats').innerHTML = ''; return; }
+    try {
+      const d = await api(`/reconcile/${aid}` + qs({ from: $('#from').value, to: $('#to').value }));
+      const sug = new Map(d.suggestions.map((s) => [s.line_id, s.txn_id]));
+      const txnById = new Map(d.txns.map((t) => [t.txn_id, t]));
+      const sugTxn = new Set(d.suggestions.map((s) => s.txn_id));
+      $('#stats').innerHTML = statCards([['對帳單筆數', fmt(d.summary.lines)], ['已對帳', fmt(d.summary.matched), 'up'], ['待對帳', fmt(d.summary.open_lines), d.summary.open_lines ? 'down' : ''], ['系統未核收支', fmt(d.summary.open_txns)],
+        ...(d.check ? [[`餘額核對（${d.check.date}）`, `對帳單 ${money(d.check.statement_balance)}／系統 ${money(d.check.system_balance)}${d.check.diff ? `<br><span class="down">差 ${money(d.check.diff)}</span>` : ' ✓'}`]] : [])]);
+      const amt = (dir, a) => (dir === DIR_IN ? `<span class="up">+${money(a)}</span>` : `<span class="down">−${money(a)}</span>`);
+      $('#work').innerHTML = `
+        <div class="section-title">對帳單明細 ${d.suggestions.length ? `<button type="button" id="acceptAll" class="primary">確認 ${d.suggestions.length} 筆建議配對</button>` : ''}</div>
+        <div class="card"><div class="table-wrap">${d.lines.length ? `<table><thead><tr><th>日期</th><th>摘要</th><th>序號</th><th class="num">金額</th><th class="num">對帳單餘額</th><th>狀態／配對</th><th></th></tr></thead><tbody>
+          ${d.lines.map((l) => {
+            const s = sug.get(l.line_id);
+            const st = l.status === '已對帳' ? `<span class="tag">已對帳 ${esc(l.matched_txn_no)}</span>` : l.status === '忽略' ? '<span class="tag">忽略</span>'
+              : s ? `<span class="tag warn">建議：${esc(txnById.get(s).txn_no)} ${esc(txnById.get(s).txn_date)}</span>` : '<span class="tag warn">找不到對應收支</span>';
+            const act = l.status === '已對帳' ? `<button type="button" class="link" data-unmatch="${l.line_id}">取消配對</button>`
+              : l.status === '忽略' ? `<button type="button" class="link" data-unignore="${l.line_id}">取消忽略</button>`
+              : `${s ? `<button type="button" class="link" data-accept="${l.line_id}">確認</button>　` : ''}<button type="button" class="link" data-pick="${l.line_id}">手動配對</button>　<button type="button" class="link" data-create="${l.line_id}">建立收支</button>　<button type="button" class="link" data-ignore="${l.line_id}">忽略</button>`;
+            return `<tr><td>${esc(l.txn_date)}</td><td>${esc(l.description)}</td><td>${esc(l.ref_no)}</td><td class="num">${amt(l.direction, l.amount)}</td><td class="num">${l.balance === null ? '' : money(l.balance)}</td><td>${st}</td><td>${act}</td></tr>`;
+          }).join('')}</tbody></table>` : '<div class="empty">這段期間還沒有匯入對帳單</div>'}</div></div>
+        <div class="section-title">系統收支（未核對） ${d.txns.filter((t) => !t.reconciled).length ? '<button type="button" id="markAll">全部標記已核對</button>' : ''}</div>
+        <div class="card"><div class="table-wrap">${d.txns.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>類別</th><th>對象／摘要</th><th class="num">金額</th><th>狀態</th><th></th></tr></thead><tbody>
+          ${d.txns.map((t) => `<tr><td>${esc(t.txn_date)}</td><td>${esc(t.txn_no)}</td><td>${esc(t.category)}</td><td>${esc([t.counterparty, t.description].filter(Boolean).join('／'))}</td><td class="num">${amt(t.direction, t.amount)}</td>
+            <td>${t.reconciled ? '<span class="tag">已核對</span>' : sugTxn.has(t.txn_id) ? '<span class="tag warn">有建議配對</span>' : '<span class="tag warn">對帳單上找不到</span>'}</td>
+            <td>${t.reconciled ? `<button type="button" class="link" data-tunmatch="${t.txn_id}">取消核對</button>` : `<button type="button" class="link" data-mark="${t.txn_id}">標記已核對</button>`}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">沒有收支</div>'}</div></div>
+        ${d.lines.length ? '<p class="hint"><button type="button" class="link" id="delOpen">刪除這段期間未對帳的對帳單明細</button>（匯入錯檔時使用）</p>' : ''}`;
+      const post = async (sub, body, msg) => { try { await api(`/reconcile/${aid}/${sub}`, { method: 'POST', body }); if (msg) toast(msg); load(); } catch (e) { fail(e); } };
+      if ($('#acceptAll')) $('#acceptAll').onclick = () => post('match', { pairs: d.suggestions.map((s) => ({ line_id: s.line_id, txn_id: s.txn_id })) }, `已對帳 ${d.suggestions.length} 筆`);
+      $$('[data-accept]').forEach((b) => b.onclick = () => post('match', { pairs: [{ line_id: Number(b.dataset.accept), txn_id: sug.get(Number(b.dataset.accept)) }] }, '已對帳'));
+      $$('[data-unmatch]').forEach((b) => b.onclick = () => post('unmatch', { line_id: Number(b.dataset.unmatch) }, '已取消配對'));
+      $$('[data-tunmatch]').forEach((b) => b.onclick = () => post('unmatch', { txn_id: Number(b.dataset.tunmatch) }, '已取消核對'));
+      $$('[data-ignore]').forEach((b) => b.onclick = () => post('ignore', { line_id: Number(b.dataset.ignore) }));
+      $$('[data-unignore]').forEach((b) => b.onclick = () => post('ignore', { line_id: Number(b.dataset.unignore), ignore: false }));
+      $$('[data-mark]').forEach((b) => b.onclick = () => post('mark', { txn_ids: [Number(b.dataset.mark)] }, '已標記'));
+      if ($('#markAll')) $('#markAll').onclick = () => confirm('把清單上所有未核對的收支都標記為已核對？') && post('mark', { txn_ids: d.txns.filter((t) => !t.reconciled).map((t) => t.txn_id) }, '已標記');
+      $$('[data-pick]').forEach((b) => b.onclick = () => {
+        const l = d.lines.find((x) => x.line_id === Number(b.dataset.pick));
+        const cands = d.txns.filter((t) => !t.reconciled && t.direction === l.direction);
+        const box = openModal(`<h2>手動配對</h2><p class="hint">對帳單：${esc(l.txn_date)}　${esc(l.description || '')}　${l.direction} ${money(l.amount)}（金額必須相同）</p>
+          <form id="f"><div class="form-grid"><label class="full">系統收支<select name="txn" required><option value="">請選擇</option>${cands.map((t) => `<option value="${t.txn_id}" ${Math.abs(t.amount - l.amount) < 0.005 ? '' : 'disabled'}>${esc(t.txn_date)}｜${esc(t.txn_no)}｜${money(t.amount)}｜${esc(t.counterparty || t.description || '')}</option>`).join('')}</select></label></div>
+          <div class="form-actions"><span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">配對</button></div></form>`);
+        $('#cancel', box).onclick = closeModal;
+        $('#f', box).onsubmit = (e) => { e.preventDefault(); closeModal(); post('match', { pairs: [{ line_id: l.line_id, txn_id: Number($('#f', box).txn.value) }] }, '已對帳'); };
+      });
+      $$('[data-create]').forEach((b) => b.onclick = () => {
+        const l = d.lines.find((x) => x.line_id === Number(b.dataset.create));
+        txnForm(l.direction, null, load, { account_id: Number(aid), txn_date: l.txn_date, amount: l.amount, description: l.description, bank_ref_no: l.ref_no, category: l.direction === DIR_IN ? '其他' : '其他' });
+      });
+      if ($('#delOpen')) $('#delOpen').onclick = async () => {
+        if (!confirm('刪除這個帳戶所有「未對帳／忽略」的對帳單明細？（已對帳的不會刪）')) return;
+        try { const r = await api(`/reconcile/${aid}/lines`, { method: 'DELETE' }); toast(`已刪除 ${r.deleted} 筆`); load(); } catch (e) { fail(e); }
+      };
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#acc').onchange = load;
+  $('#upload').onclick = () => { if (!$('#acc').value) return toast('請先選擇帳戶', true); $('#file').click(); };
+  $('#file').onchange = async () => {
+    const file = $('#file').files[0];
+    $('#file').value = '';
+    if (!file) return;
+    try { csvMappingForm(Number($('#acc').value), parseCsv(await readTextFile(file)), file.name, load); } catch (e) { fail(e); }
+  };
+  load();
+}
+
+async function csvMappingForm(aid, rows, filename, reload) {
+  if (!rows.length) return toast('檔案是空的', true);
+  const saved = (await api(`/reconcile/${aid}/profile`)).data || {};
+  const width = Math.max(...rows.slice(0, 20).map((r) => r.length));
+  // 自動猜：找含「日期」的列當標題列
+  const guessHeader = rows.findIndex((r) => r.some((c) => /日期|交易日/.test(c)));
+  const m = { header: saved.header ?? Math.max(0, guessHeader) + (guessHeader >= 0 ? 1 : 0), mode: saved.mode || 'split', ...saved };
+  const hdr = rows[Math.max(0, m.header - 1)] || [];
+  const guess = (re) => { const i = hdr.findIndex((c) => re.test(c)); return i >= 0 ? i : ''; };
+  m.date ??= guess(/交易日|日期/); m.in ??= guess(/存入|收入|轉入|貸方/); m.out ??= guess(/支出|提款|轉出|借方/); m.amount ??= guess(/^金額|交易金額/);
+  m.desc ??= guess(/摘要|說明|備註|附言/); m.ref ??= guess(/序號|交易序|流水|代號/); m.balance ??= guess(/餘額|結餘/);
+  const colOpts = (sel) => '<option value="">（無）</option>' + Array.from({ length: width }, (_, i) => `<option value="${i}" ${String(sel) === String(i) ? 'selected' : ''}>第 ${i + 1} 欄${hdr[i] ? `：${esc(hdr[i].slice(0, 12))}` : ''}</option>`).join('');
+  const box = openModal(`
+    <h2>匯入對帳單：${esc(filename)}</h2>
+    <form id="f">
+      <div class="form-grid">
+        <label>略過前幾列（標題）<input name="header" type="number" min="0" value="${esc(m.header)}"></label>
+        <label>日期欄 *<select name="date" required>${colOpts(m.date)}</select></label>
+        <label>金額格式<select name="mode"><option value="split" ${m.mode === 'split' ? 'selected' : ''}>存入、支出分兩欄</option><option value="signed" ${m.mode === 'signed' ? 'selected' : ''}>單一金額欄（負數 = 支出）</option></select></label>
+        <label data-m="split">存入欄<select name="in">${colOpts(m.in)}</select></label>
+        <label data-m="split">支出欄<select name="out">${colOpts(m.out)}</select></label>
+        <label data-m="signed">金額欄<select name="amount">${colOpts(m.amount)}</select></label>
+        <label>摘要欄<select name="desc">${colOpts(m.desc)}</select></label>
+        <label>交易序號欄<select name="ref">${colOpts(m.ref)}</select></label>
+        <label>餘額欄<select name="balance">${colOpts(m.balance)}</select></label>
+      </div>
+      <div class="section-title">預覽（前 8 筆轉換結果）</div>
+      <div class="table-wrap" id="pv"></div>
+      <p class="hint">設定會存起來，下次這個帳戶匯入時自動套用。重複匯入同一筆明細會自動略過。</p>
+      <div class="form-actions"><span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">匯入</button></div>
+    </form>`, true);
+  const f = $('#f', box);
+  const readMap = () => Object.fromEntries(['header', 'date', 'mode', 'in', 'out', 'amount', 'desc', 'ref', 'balance'].map((k) => [k, f[k].value === '' ? '' : k === 'mode' ? f[k].value : Number(f[k].value)]));
+  const convert = (mp) => rows.slice(mp.header || 0).map((r, i) => {
+    const date = parseDate(r[mp.date]);
+    let amount = null; let dir = null;
+    if (mp.mode === 'split') {
+      const a = mp.in === '' ? null : parseNum(r[mp.in]); const b = mp.out === '' ? null : parseNum(r[mp.out]);
+      if (a) { amount = Math.abs(a); dir = DIR_IN; } else if (b) { amount = Math.abs(b); dir = DIR_OUT; }
+    } else {
+      const a = mp.amount === '' ? null : parseNum(r[mp.amount]);
+      if (a) { amount = Math.abs(a); dir = a > 0 ? DIR_IN : DIR_OUT; }
+    }
+    return { row: i + 1 + (mp.header || 0), txn_date: date, direction: dir, amount, description: mp.desc === '' ? '' : (r[mp.desc] || '').trim(), ref_no: mp.ref === '' ? '' : (r[mp.ref] || '').trim(), balance: mp.balance === '' ? null : parseNum(r[mp.balance]) };
+  });
+  const preview = () => {
+    const mp = readMap();
+    $$('[data-m]', box).forEach((el) => (el.hidden = el.dataset.m !== mp.mode));
+    const out = convert(mp);
+    const ok = out.filter((x) => x.txn_date && x.amount);
+    $('#pv', box).innerHTML = `<p class="hint">可匯入 ${ok.length} 筆，略過 ${out.length - ok.length} 列（日期或金額無法辨識，例如合計列）。</p>
+      <table><thead><tr><th>列</th><th>日期</th><th class="num">金額</th><th>摘要</th><th>序號</th><th class="num">餘額</th></tr></thead><tbody>
+      ${out.slice(0, 8).map((x) => `<tr><td>${x.row}</td><td>${x.txn_date ? esc(x.txn_date) : '<span class="tag warn">無法辨識</span>'}</td><td class="num">${x.amount ? (x.direction === DIR_IN ? `<span class="up">+${money(x.amount)}</span>` : `<span class="down">−${money(x.amount)}</span>`) : '<span class="tag warn">—</span>'}</td>
+        <td>${esc(x.description)}</td><td>${esc(x.ref_no)}</td><td class="num">${x.balance === null ? '' : money(x.balance)}</td></tr>`).join('')}</tbody></table>`;
+  };
+  f.addEventListener('change', preview);
+  f.header.oninput = preview;
+  preview();
+  $('#cancel', box).onclick = closeModal;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const mp = readMap();
+    const lines = convert(mp).filter((x) => x.txn_date && x.amount).map(({ row, ...x }) => x);
+    if (!lines.length) return toast('沒有可匯入的明細，請檢查欄位設定', true);
+    try {
+      await api(`/reconcile/${aid}/profile`, { method: 'PUT', body: { mapping: mp } });
+      const r = await api(`/reconcile/${aid}/import`, { method: 'POST', body: { lines } });
+      closeModal(); toast(`已匯入 ${r.inserted} 筆${r.skipped ? `，略過重複 ${r.skipped} 筆` : ''}`); reload();
+    } catch (err) { fail(err); }
+  };
+}
+
+// ---------------------------------------------------------------- 使用者
+async function pageUsers() {
+  $('#main').innerHTML = `
+    <h2>使用者</h2>
+    <div class="toolbar"><span class="spacer"></span><button id="add" class="primary">＋ 新增使用者</button></div>
+    <p class="hint">登入由 Cloudflare Access 控管；這裡決定登入後的角色與權限。<b>新增使用者後，也要到 Cloudflare Zero Trust → Access → Applications 把對方的 email 加進允許名單</b>，對方才登得進來。至少保留一位管理者。</p>
+    <div class="card"><div class="table-wrap" id="list"></div></div>
+    <div class="section-title">角色權限</div>
+    <div class="card"><div class="table-wrap" id="roles"></div></div>`;
+  const load = async () => {
+    try {
+      const [{ data }, roles] = await Promise.all([api('/users'), api('/users/roles')]);
+      $('#list').innerHTML = `<table><thead><tr><th>Email</th><th>名稱</th><th>角色</th><th>最後登入</th><th>狀態</th><th>備註</th></tr></thead><tbody>
+        ${data.map((u) => `<tr class="clickable" data-id="${u.user_id}"><td>${esc(u.email)}${ME && u.email === ME.email ? '（你）' : ''}</td><td>${esc(u.name)}</td><td>${esc(u.role)}</td><td>${esc(u.last_login_at)}</td>
+          <td>${u.is_active ? '<span class="tag">啟用</span>' : '<span class="tag warn">停用</span>'}</td><td>${esc(u.note)}</td></tr>`).join('')}</tbody></table>`;
+      const mods = roles.modules;
+      $('#roles').innerHTML = `<table><thead><tr><th>功能</th>${roles.data.map((r) => `<th>${esc(r.role)}</th>`).join('')}</tr></thead><tbody>
+        ${Object.entries(mods).map(([k, label]) => `<tr><td>${esc(label)}</td>${roles.data.map((r) => `<td>${r.write.includes(k) ? '<span class="up">可修改</span>' : r.read.includes(k) ? '可查看' : '<span class="down">—</span>'}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => userForm(data.find((u) => u.user_id === Number(tr.dataset.id)), load));
+    } catch (e) { fail(e); }
+  };
+  $('#add').onclick = () => userForm(null, load);
+  load();
+}
+function userForm(u, reload) {
+  const x = u || { role: '門市', is_active: 1 };
+  const box = openModal(`
+    <h2>${u ? '修改使用者' : '新增使用者'}</h2>
+    <form id="f"><div class="form-grid">
+      <label>Email（Google 帳號）*<input name="email" type="email" required value="${esc(x.email)}"></label>
+      <label>名稱<input name="name" value="${esc(x.name)}"></label>
+      <label>角色<select name="role">${plainOpts(['管理者', '烘豆師', '門市', '會計'], x.role)}</select></label>
+      <label>狀態<select name="is_active"><option value="1" ${x.is_active ? 'selected' : ''}>啟用</option><option value="0" ${x.is_active ? '' : 'selected'}>停用</option></select></label>
+      <label class="full">備註<input name="note" value="${esc(x.note)}"></label>
+    </div>
+    <div class="form-actions">${u ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">存檔</button></div></form>`);
+  const f = $('#f', box);
+  $('#cancel', box).onclick = closeModal;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api(u ? `/users/${u.user_id}` : '/users', { method: u ? 'PUT' : 'POST', body: Object.fromEntries(new FormData(f)) }); closeModal(); toast(u ? '已存檔' : '已新增，記得也把對方加進 Cloudflare Access'); reload(); } catch (err) { fail(err); }
+  };
+  if (u) $('#del', box).onclick = async () => {
+    if (!confirm(`確定刪除 ${u.email}？（建議改為停用，保留紀錄）`)) return;
+    try { await api(`/users/${u.user_id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+  };
+}
+
+// ---------------------------------------------------------------- 操作日誌
+const RES_LABELS = {
+  purchases: '進貨單', sales: '銷貨單', returns: '退貨／折讓', subscriptions: '訂閱', invoices: '發票', 'roast-batches': '烘焙批次', 'opening-stock': '期初庫存', 'stock-counts': '盤點／調整',
+  'bank-transactions': '銀行收支', expenses: '費用', reconcile: '銀行對帳', recipes: '產品配方', users: '使用者', import: '主檔匯入',
+  suppliers: '供應商', customers: '客戶', 'green-beans': '生豆品項', 'roasted-beans': '熟豆品項', 'packaging-items': '包材', products: '產品', 'bank-accounts': '銀行帳戶', 'expense-categories': '費用類別',
+};
+async function pageAudit() {
+  $('#main').innerHTML = `
+    <h2>操作日誌</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>功能<select id="res"><option value="">全部</option>${Object.entries(RES_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+      <label>動作<select id="act">${plainOpts(['新增', '修改', '刪除', '其他'], null, '全部')}</select></label>
+      <label>使用者<select id="usr"><option value="">全部</option></select></label>
+      <label>搜尋<input id="q" placeholder="單號、名稱"></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+    </div>
+    <p class="hint">所有新增、修改、刪除都會自動記錄操作者與修改前後的資料（最多顯示 200 筆，請用條件縮小範圍）。點任一列看差異。</p>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  let usersLoaded = false;
+  const load = async () => {
+    try {
+      const { data, users } = await api('/audit-logs' + qs({ from: $('#from').value, to: $('#to').value, resource: $('#res').value, action: $('#act').value, user: $('#usr').value, q: $('#q').value.trim() }));
+      if (!usersLoaded) { $('#usr').insertAdjacentHTML('beforeend', users.map((u) => `<option>${esc(u)}</option>`).join('')); usersLoaded = true; }
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>時間</th><th>使用者</th><th>動作</th><th>功能</th><th>單號／名稱</th><th>路徑</th></tr></thead><tbody>
+        ${data.map((l) => `<tr class="clickable" data-id="${l.log_id}"><td>${esc(l.created_at)}</td><td>${esc(l.user_email)}</td>
+          <td><span class="${l.action === '新增' ? 'up' : l.action === '刪除' ? 'down' : ''}">${esc(l.action)}</span></td><td>${esc(RES_LABELS[l.resource] || l.resource)}</td><td>${esc(l.summary)}</td><td class="hint">${esc(l.method)} ${esc(l.path)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">沒有紀錄</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => auditDetail(Number(tr.dataset.id)));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#q').onkeydown = (e) => e.key === 'Enter' && load();
+  load();
+}
+async function auditDetail(id) {
+  try {
+    const { data: l } = await api(`/audit-logs/${id}`);
+    const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return s; } };
+    const b = parse(l.before_json); const a = parse(l.after_json);
+    const flat = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? o : {});
+    const keys = [...new Set([...Object.keys(flat(b)), ...Object.keys(flat(a))])];
+    const show = (v) => (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v, null, 1) : String(v));
+    const changed = keys.filter((k) => JSON.stringify(flat(b)[k]) !== JSON.stringify(flat(a)[k]));
+    openModal(`
+      <h2>${esc(l.action)}｜${esc(RES_LABELS[l.resource] || l.resource)} ${esc(l.summary || '')}</h2>
+      <p class="hint">${esc(l.created_at)}　${esc(l.user_email)}　${esc(l.method)} ${esc(l.path)}</p>
+      ${b && a && typeof a === 'object' && keys.length ? `<div class="section-title">欄位差異（${changed.length} 個欄位有變動）</div>
+        <div class="table-wrap"><table><thead><tr><th>欄位</th><th>修改前</th><th>修改後</th></tr></thead><tbody>
+        ${keys.map((k) => { const ch = changed.includes(k); return `<tr ${ch ? 'style="background:#fff7e6"' : ''}><td>${esc(k)}</td><td><pre class="json">${esc(show(flat(b)[k]))}</pre></td><td><pre class="json">${esc(show(flat(a)[k]))}</pre></td></tr>`; }).join('')}
+        </tbody></table></div>` : `<div class="form-grid"><div class="full"><div class="section-title">修改前</div><pre class="json">${esc(show(b) || '（無）')}</pre></div>
+        <div class="full"><div class="section-title">${l.action === '刪除' ? '請求內容' : '修改後／結果'}</div><pre class="json">${esc(show(a) || '（無）')}</pre></div></div>`}
+      <div class="form-actions"><span class="spacer"></span><button type="button" onclick="closeModal()">關閉</button></div>`, true);
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 匯入／備份
+const IMPORTABLE = { suppliers: '供應商', customers: '客戶', 'green-beans': '生豆品項', 'packaging-items': '包材', products: '產品' };
+async function readSheetRows(file) {
+  if (/\.csv$|\.txt$/i.test(file.name)) {
+    const rows = parseCsv(await readTextFile(file));
+    const [h, ...rest] = rows;
+    return rest.map((r) => Object.fromEntries(h.map((k, i) => [k.trim(), r[i] ?? ''])));
+  }
+  const ExcelJS = await loadExcel();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+  const ws = wb.worksheets[0];
+  const header = [];
+  ws.getRow(1).eachCell((c, i) => { header[i] = String(c.text || '').trim(); });
+  const out = [];
+  ws.eachRow((row, n) => {
+    if (n === 1) return;
+    const o = {};
+    header.forEach((h, i) => { if (!h) return; const c = row.getCell(i); const v = c.value; o[h] = v instanceof Date ? v.toISOString() : (v && typeof v === 'object' ? (v.result ?? v.text ?? c.text) : v); });
+    out.push(o);
+  });
+  return out;
+}
+async function pageData() {
+  const isAdmin = ME?.role === '管理者';
+  $('#main').innerHTML = `
+    <h2>匯入／備份</h2>
+    <div class="section-title">主檔匯入</div>
+    <div class="toolbar">
+      <label>資料<select id="res">${Object.entries(IMPORTABLE).filter(([k]) => canWriteRes(k)).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+      <button id="tpl">⬇ 下載範本（含目前資料）</button>
+      <button id="pick" class="primary">⬆ 選擇 Excel／CSV 匯入</button><input type="file" id="file" accept=".xlsx,.csv,.txt" hidden>
+    </div>
+    <p class="hint">用範本的第一列欄名填資料（範本裡已含目前所有資料，可直接修改後匯回）。名稱相同（產品可用料號）視為同一筆 → 更新；新的名稱 → 新增。
+      關聯欄位（供應商、熟豆品項）請填名稱。匯入前會先全部檢查，有任何錯誤整批都不會寫入。</p>
+    <div id="result"></div>
+    <div class="section-title">全部資料備份</div>
+    <p class="hint">${isAdmin ? '把所有資料表匯出成一個 Excel 檔（每個資料表一張工作表），建議每月下載一份留存。另外 Cloudflare D1 本身有 30 天的「時間移動」可以還原。' : '只有管理者可以下載全部資料備份。'}</p>
+    ${isAdmin ? '<div class="toolbar"><button id="backup" class="primary">⬇ 下載全部資料備份</button></div>' : ''}`;
+  const res = () => $('#res').value;
+  $('#tpl').onclick = async () => {
+    try {
+      const ExcelJS = await loadExcel();
+      const [{ data: t }, list] = await Promise.all([api(`/import/${res()}`), api(`/${res()}`)]);
+      const nameMaps = {};
+      if (['green-beans', 'packaging-items'].includes(res())) nameMaps.s = new Map((await lookup('suppliers', true)).map((x) => [x.supplier_id, x.name]));
+      if (res() === 'products') nameMaps.r = new Map((await lookup('roasted-beans', true)).map((x) => [x.roasted_bean_id, x.name]));
+      const val = (row, f) => {
+        if (f === 'is_active') return row.is_active ? '是' : '否';
+        if (f === 'default_supplier_id' || f === 'supplier_id') return nameMaps.s?.get(row[f]) || '';
+        if (f === 'roasted_bean_id') return nameMaps.r?.get(row[f]) || '';
+        return row[f] ?? '';
+      };
+      const wb = new ExcelJS.Workbook();
+      addAoaSheet(wb, t.label, [t.cols.map((c) => c.label + (c.required ? ' *' : '')), ...list.data.map((row) => t.cols.map((c) => val(row, c.field)))], new Set());
+      await downloadWorkbook(wb, `匯入範本_${t.label}_${today()}.xlsx`);
+    } catch (e) { fail(e); }
+  };
+  $('#pick').onclick = () => $('#file').click();
+  $('#file').onchange = async () => {
+    const file = $('#file').files[0];
+    $('#file').value = '';
+    if (!file) return;
+    try {
+      const rows = (await readSheetRows(file)).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k.replace(/\s*\*$/, ''), v])));
+      const run = async (dry) => api(`/import/${res()}`, { method: 'POST', body: { rows, dry_run: dry } });
+      let r;
+      try { r = await run(true); } catch (e) {
+        if (e.data?.errors) {
+          $('#result').innerHTML = `<div class="notice">檔案有 ${e.data.errors.length} 列錯誤，整批沒有匯入。請修正後再匯入：</div>
+            <div class="card"><div class="table-wrap"><table><thead><tr><th>Excel 列</th><th>錯誤</th></tr></thead><tbody>${e.data.errors.map((x) => `<tr><td>${x.line}</td><td>${esc(x.error)}</td></tr>`).join('')}</tbody></table></div></div>`;
+          return;
+        }
+        throw e;
+      }
+      if (!confirm(`「${file.name}」檢查通過：\n新增 ${r.insert} 筆、更新 ${r.update} 筆。\n\n確定匯入？`)) return;
+      r = await run(false);
+      $('#result').innerHTML = `<div class="notice">已匯入：新增 ${r.insert} 筆、更新 ${r.update} 筆。</div>`;
+      delete cache[res()];
+    } catch (e) { fail(e); }
+  };
+  if ($('#backup')) $('#backup').onclick = async () => {
+    try {
+      toast('準備備份中…');
+      const [ExcelJS, d] = await Promise.all([loadExcel(), api('/backup')]);
+      const wb = new ExcelJS.Workbook();
+      const used = new Set();
+      for (const [name, rows] of Object.entries(d.tables)) {
+        const cols = rows.length ? Object.keys(rows[0]) : ['（空）'];
+        addAoaSheet(wb, name, [cols, ...rows.map((r) => cols.map((c) => r[c]))], used);
+      }
+      await downloadWorkbook(wb, `pinncafe-erp_備份_${today()}.xlsx`);
+      toast(`已下載 ${Object.keys(d.tables).length} 個資料表`);
+    } catch (e) { fail(e); }
+  };
+}
+
 // ---------------------------------------------------------------- 路由
 const ROUTES = {
   purchases: pagePurchases,
@@ -1999,19 +2724,43 @@ const ROUTES = {
   'stock-beans': pageStockBeans,
   'stock-roasted': pageStockRoasted,
   'stock-packaging': pageStockPackaging,
+  reconcile: pageReconcile,
+  'rpt-profit': pageProfit,
+  'rpt-pnl': pagePnl,
+  'rpt-loss': pageLoss,
+  'rpt-trace': pageTrace,
+  'rpt-stock': pageStockNow,
+  'rpt-processing': pageProcessing,
+  users: pageUsers,
+  audit: pageAudit,
+  data: pageData,
   ...Object.fromEntries(Object.keys(MASTERS).map((k) => [k, () => pageMaster(k)])),
 };
 
 function route() {
-  const key = location.hash.slice(1) || 'purchases';
+  let key = location.hash.slice(1) || 'purchases';
+  if (!ROUTES[key]) key = 'purchases';
+  if (!canRead(key)) { // 沒權限的頁面 → 第一個有權限的頁面
+    const first = $$('#nav a').find((a) => !a.hidden);
+    if (first && first.getAttribute('href') !== '#' + key) { location.hash = first.getAttribute('href'); return; }
+  }
   $$('#nav a').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + key));
   $('#nav').classList.remove('open');
   closeModal();
-  (ROUTES[key] || ROUTES.purchases)().catch(fail);
+  Promise.resolve(ROUTES[key]()).then(addExportButton).catch(fail);
 }
 
 window.addEventListener('hashchange', route);
 $('#menuBtn').onclick = () => $('#nav').classList.toggle('open');
 $('#modal').addEventListener('mousedown', (e) => { if (e.target.id === 'modal') closeModal(); });
-api('/me').then((r) => ($('#who').textContent = r.data.email)).catch(() => {});
-route();
+// 依角色隱藏沒有權限的選單，再開始路由
+api('/me').then((r) => {
+  ME = r.data;
+  $('#who').textContent = `${ME.email}（${ME.role}）`;
+  $$('#nav a').forEach((a) => { a.hidden = !canRead(a.getAttribute('href').slice(1)); });
+  $$('#nav .nav-group').forEach((g) => { // 整組都沒權限就隱藏標題
+    let el = g.nextElementSibling; let any = false;
+    while (el && !el.classList.contains('nav-group')) { if (!el.hidden) any = true; el = el.nextElementSibling; }
+    g.hidden = !any;
+  });
+}).catch((e) => { $('#who').textContent = ''; $('#main').innerHTML = `<div class="notice">${esc(e.message)}</div>`; throw e; }).then(route, () => {});

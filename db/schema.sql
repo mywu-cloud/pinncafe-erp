@@ -10,6 +10,8 @@
 --          既有資料庫升級：跑本檔後再跑 db/migrations/004_phase3.sql（重算收付款狀態）
 -- Phase 4：配方（包材）、退貨／折讓、發票、訂閱、盤點與庫存調整
 --          既有資料庫升級：先跑 db/migrations/005_phase4.sql（加欄位）再跑本檔
+-- Phase 5：使用者與角色、操作日誌、銀行對帳單匯入與對帳
+--          既有資料庫升級：直接跑本檔（只新增資料表）
 -- 規格：ARCHITECTURE.md
 --
 -- 慣例
@@ -635,6 +637,77 @@ CREATE TABLE IF NOT EXISTS stock_count_items (
   note        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_count_items_count ON stock_count_items(count_id);
+
+-- =============================================================
+-- Phase 5
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- 6.1 使用者與角色
+--   登入仍由 Cloudflare Access 負責；這裡決定登入後能看／能改哪些功能
+--   users 為空時，第一個登入的人自動成為管理者
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+  user_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+  name          TEXT,
+  role          TEXT    NOT NULL DEFAULT '門市' CHECK (role IN ('管理者','烘豆師','門市','會計')),
+  is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  last_login_at TEXT,
+  note          TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
+-- -------------------------------------------------------------
+-- 6.2 操作日誌（所有新增／修改／刪除自動記錄）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_logs (
+  log_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_email  TEXT,
+  action      TEXT    NOT NULL,                       -- 新增／修改／刪除／其他
+  resource    TEXT    NOT NULL,                       -- API 資源，如 sales、purchases
+  record_id   TEXT,
+  method      TEXT    NOT NULL,
+  path        TEXT    NOT NULL,
+  summary     TEXT,                                   -- 單號／名稱等
+  before_json TEXT,
+  after_json  TEXT,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_date ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_res  ON audit_logs(resource, record_id);
+
+-- -------------------------------------------------------------
+-- 5.4 銀行對帳
+--   bank_import_profiles：每個帳戶的 CSV 欄位對應設定（JSON）
+--   bank_statement_lines：匯入的對帳單明細；配對到 bank_transactions 後兩邊都標記已對帳
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bank_import_profiles (
+  account_id INTEGER PRIMARY KEY REFERENCES bank_accounts(account_id),
+  mapping    TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
+CREATE TABLE IF NOT EXISTS bank_statement_lines (
+  line_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id     INTEGER NOT NULL REFERENCES bank_accounts(account_id),
+  txn_date       TEXT    NOT NULL,
+  direction      TEXT    NOT NULL CHECK (direction IN ('入帳','出帳')),
+  amount         REAL    NOT NULL CHECK (amount > 0),
+  description    TEXT,
+  ref_no         TEXT,
+  balance        REAL,                                -- 對帳單上的餘額（若有）
+  dedupe_key     TEXT    NOT NULL,                    -- 防止重複匯入
+  import_batch   TEXT,
+  status         TEXT    NOT NULL DEFAULT '未對帳' CHECK (status IN ('未對帳','已對帳','忽略')),
+  matched_txn_id INTEGER REFERENCES bank_transactions(txn_id),
+  created_by     TEXT,
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  UNIQUE (account_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_stmt_account ON bank_statement_lines(account_id, txn_date);
+CREATE INDEX IF NOT EXISTS idx_stmt_txn     ON bank_statement_lines(matched_txn_id);
 
 -- =============================================================
 -- VIEWS

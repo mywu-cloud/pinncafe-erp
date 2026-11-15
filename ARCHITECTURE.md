@@ -3,7 +3,7 @@
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
 >
-> **實作狀態**：Phase 1～4 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存）、[第 14 節](#14-phase-3-實作決議)（Phase 3）、[第 15 節](#15-phase-4-實作決議)（Phase 4），各表欄位也已同步更新。
+> **實作狀態**：Phase 1～5 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存）、[第 14 節](#14-phase-3-實作決議)（Phase 3）、[第 15 節](#15-phase-4-實作決議)（Phase 4）、[第 16 節](#16-phase-5-實作決議)（Phase 5），各表欄位也已同步更新。
 > 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
@@ -25,6 +25,7 @@
 13. [期初庫存](#13-期初庫存)
 14. [Phase 3 實作決議](#14-phase-3-實作決議)
 15. [Phase 4 實作決議](#15-phase-4-實作決議)
+16. [Phase 5 實作決議](#16-phase-5-實作決議)
 
 ---
 
@@ -528,21 +529,74 @@
 
 > 原規格的 `account_id`（從哪個帳戶付）拿掉：費用只記費用、不動帳戶，付款由出帳沖帳（見第 14 節）。
 
+### 5.4 銀行對帳 `bank_import_profiles` / `bank_statement_lines`（Phase 5 已實作）
+
+`bank_import_profiles`：每個帳戶一筆 CSV 欄位對應（`mapping` JSON：略過列數、日期欄、存入／支出兩欄或單一正負金額欄、摘要、交易序號、餘額）。
+
+`bank_statement_lines`（對帳單明細）
+
+| 欄位 | 說明 |
+|---|---|
+| line_id | PK |
+| account_id | FK → bank_accounts |
+| txn_date、direction（入帳／出帳）、amount（> 0） | |
+| description、ref_no、balance | 摘要、銀行交易序號、對帳單餘額 |
+| dedupe_key | 日期｜方向｜金額｜序號或摘要｜餘額（同檔重複再加 #n）；`UNIQUE(account_id, dedupe_key)`，重複匯入自動略過 |
+| import_batch | 匯入批次 |
+| status | 未對帳／已對帳／忽略 |
+| matched_txn_id | FK → bank_transactions |
+| created_by、created_at | |
+
+規則：
+- 前端解析 CSV（自動判斷 UTF-8／Big5、逗號／Tab；日期支援西元、民國年、8 碼數字），轉成標準欄位後送 API；無法辨識日期或金額的列（例如合計列）略過。
+- **建議配對**：同帳戶、同方向、同金額、日期相差 5 天內；有相同交易序號者優先，其次日期最近。一筆收支只配一筆明細。使用者確認後兩邊都標記已對帳（`bank_transactions.reconciled = 1`）。
+- 對帳單有、系統沒有 → 直接「建立收支」（帶入帳戶、日期、金額、摘要、序號）；不需要對帳的明細可「忽略」。
+- 沒有對帳單的帳戶（現金）可直接把收支「標記已核對」。
+- **已對帳的收支不能修改帳戶、日期、方向、金額，也不能刪除**（轉帳的另一半已對帳亦同），要改需先取消對帳；沖帳、摘要仍可改。
+- 餘額核對：以最後一筆有餘額的對帳單明細，比較對帳單餘額與系統該日帳戶餘額。
+
 ---
 
 ## 6. 系統
 
-### 6.1 使用者 `users`
+### 6.1 使用者 `users`（Phase 5 已實作）
 
 | 欄位 | 說明 |
 |---|---|
-| user_id、name、email、role（管理者／烘豆師／門市／會計）、is_active |
+| user_id | PK |
+| email | Google 帳號（Cloudflare Access 傳來的 email，不分大小寫，唯一） |
+| name | 顯示名稱 |
+| role | 管理者／烘豆師／門市／會計（權限表見第 16 節） |
+| is_active | 停用後無法使用 API |
+| last_login_at | 最後使用時間（約每 10 分鐘更新一次） |
+| note、created_at、updated_at | |
 
-### 6.2 操作日誌 `audit_logs`
+- 登入仍由 Cloudflare Access 把關；`users` 決定登入後的角色。**新增使用者時，要同時把 email 加進 Cloudflare Access 的允許名單。**
+- `users` 表是空的時候，第一位登入者自動成為管理者；之後不在名單中的 email 一律 403。
+- 不能把自己降級或停用；系統至少保留一位啟用中的管理者。
+- 其他表的 `created_by` 仍存 email（不改成 user_id 外鍵，避免改動既有資料表）。
+
+### 6.2 操作日誌 `audit_logs`（Phase 5 已實作）
 
 | 欄位 | 說明 |
 |---|---|
-| log_id、user_id、action（新增／修改／刪除）、table_name、record_id、before_json、after_json、created_at |
+| log_id | PK |
+| user_email | 操作者 |
+| action | 新增／修改／刪除／其他（POST 動作類，如沖帳、對帳、匯入） |
+| resource | API 資源（purchases、sales、reconcile…） |
+| record_id、summary | 紀錄 ID、單號或名稱 |
+| method、path | HTTP 方法與路徑 |
+| before_json | 修改／刪除前，由 API 內部先 GET 一次取得的完整資料 |
+| after_json | 新增／修改後的回應資料（刪除時為請求內容）；JSON 最多 60,000 字 |
+| created_at | |
+
+- 由 API 統一攔截所有非 GET 請求自動記錄；失敗的請求與試算（`dry_run`）不記。日誌寫入失敗不影響原本的操作。
+
+### 6.3 匯入與備份
+
+- **主檔匯入**：供應商、客戶、生豆品項、包材、產品。可下載含目前資料的 Excel 範本，填好匯回；名稱相同（產品可用料號）→ 更新，否則新增；關聯欄位填名稱。先整批檢查，有任何錯誤整批不寫入。
+- **查詢頁匯出**：每個有表格的頁面都有「匯出 Excel」，匯出畫面上的表格（數字轉回數值、百分比轉成百分比格式），第一張工作表上方註明篩選條件。前端以 ExcelJS（`web/admin/vendor/`，MIT）產生。
+- **全部資料備份**：管理者可下載所有資料表（每表一張工作表）。另外 Cloudflare D1 本身有 30 天時間移動（Time Travel）可還原。
 
 ---
 
@@ -684,8 +738,13 @@ erDiagram
 | 應收帳款 | 截止日期、客戶 | 帳齡分析（30／60／90 天）、逾期、信用額度（Phase 3） |
 | 應付帳款 | 截止日期、供應商、類型 | 進貨單＋費用待付清單、帳齡（Phase 3） |
 | 費用分析 | 日期、類別 | 各類費用合計、佔比、逐月（Phase 3） |
-| 毛利分析 | 日期、產品、客戶 | 營收 − 成本 = 毛利、毛利率 |
-| 損益概要 | 月／季／年 | 營收 − 銷貨成本 − 費用 = 淨利 |
+| 毛利分析 | 日期；依產品／客戶／通路／熟豆品項／月份分組 | 營收、退貨折讓、成本（熟豆＋包材）、毛利、加工成本、調整後毛利（Phase 5） |
+| 損益概要 | 日期；月／季／年 | 營業收入 − 銷貨成本 = 毛利；− 各類費用 − 庫存損耗 = 淨利（Phase 5） |
+| 加工成本 | 日期 | 每月攤入烘焙費用 ÷ 烘焙產出 kg = 每 kg 加工成本、未攤提（Phase 5） |
+| 銀行對帳 | 帳戶、日期 | 對帳單明細 vs 系統收支、建議配對、餘額核對（Phase 5） |
+| 操作日誌 | 日期、功能、動作、使用者、關鍵字 | 誰在何時新增／修改／刪除了什麼，修改前後差異（Phase 5） |
+
+失重率分析、庫存現況、批號追溯於 Phase 5 完成獨立報表頁；所有查詢頁都可匯出 Excel。
 
 ---
 
@@ -898,3 +957,64 @@ API：
 | `/api/stock-counts/sheet` | GET（`?item_type=&date=&exclude_count_id=`） | 盤點表（帳面數量、單位成本） |
 
 銷貨單 GET 另回傳 `returns`、`returned_amount`、`net_amount`、`invoices`、每筆明細的 `packs`；進貨單 GET 另回傳 `returns`、`net_amount`、`refundable`。銀行收支 `open-docs` 另列出可退款的單據（`kind = refund`）。
+
+---
+
+## 16. Phase 5 實作決議
+
+| # | 項目 | 決議 |
+|---|---|---|
+| 1 | 費用攤提 | **報表層按月攤提**：每月 `allocate_to_roast` 的費用 ÷ 當月烘焙產出 kg = 每 kg 加工成本。毛利分析以「出貨熟豆 kg × 該熟豆批次烘焙月份的費率」計算加工成本、調整後毛利；**不改寫已存檔的熟豆或銷貨成本**。當月沒有烘焙產出 → 列為未攤提。損益概要直接以費用列示，不重複攤提 |
+| 2 | 權限 | **建使用者與角色**，先只有 MY（管理者）。以「功能模組」控管查看／修改，見下表。登入仍靠 Cloudflare Access；新增使用者要同時加入 Access 允許名單 |
+| 3 | 銀行 CSV | **通用欄位對應**：使用者自己指定欄位，每個帳戶存一份設定，下次自動套用；不寫死特定銀行格式 |
+| 4 | 匯入匯出 | 各查詢頁匯出 Excel、主檔匯入（Excel／CSV）、全部資料備份（管理者） |
+| 5 | 退貨在毛利 | 退貨折讓依退貨日計入；銷貨退回扣回數量、成本、加工成本；純折讓依明細金額比例分攤 |
+| 6 | 營收口徑 | 毛利分析的營收 = 明細金額 ×（1 − 整單折扣 ÷ 小計），不含運費；損益概要另列運費收入 |
+| 7 | 庫存損耗 | 損益概要的庫存損耗 = 盤虧＋試喝＋樣品＋報廢 − 盤盈（依異動成本） |
+| 8 | 已對帳鎖定 | 已對帳收支鎖住帳戶、日期、方向、金額與刪除 |
+
+### 角色權限
+
+| 功能模組 | 管理者 | 烘豆師 | 門市 | 會計 |
+|---|---|---|---|---|
+| 產品／品項主檔（供應商、生豆、熟豆、包材、產品、配方） | 修改 | 修改 | 查看 | 查看 |
+| 客戶 | 修改 | 查看 | 修改 | 查看 |
+| 進貨 | 修改 | 修改 | — | 修改 |
+| 生產（烘焙、期初庫存、盤點） | 修改 | 修改 | — | 查看 |
+| 庫存查詢 | 修改 | 查看 | 查看 | 查看 |
+| 銷貨（銷貨、訂閱、發票） | 修改 | 查看 | 修改 | 修改 |
+| 退貨／折讓 | 修改 | 修改 | 修改 | 修改 |
+| 財務（收支、費用、應收付、對帳、帳戶） | 修改 | — | — | 修改 |
+| 報表 | 修改 | 查看 | — | 查看 |
+| 系統（使用者、日誌、備份） | 修改 | — | — | — |
+
+GET = 查看、其他方法 = 修改；後端每個請求都檢查（`api/lib/perm.js`），前端依 `/api/me` 隱藏沒有權限的選單。
+
+**既有資料庫升級**：直接跑 `db/schema.sql`（只新增 `users`、`audit_logs`、`bank_import_profiles`、`bank_statement_lines` 四張表）。**要在部署新版程式之前建表**，否則登入時找不到 `users` 表。
+
+### API 一覽（Phase 5 新增）
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/me` | GET | 目前使用者 email、name、role、可查看／修改的模組 |
+| `/api/users` | GET／POST | 使用者列表、新增 |
+| `/api/users/{id}` | PUT／DELETE | 修改、刪除 |
+| `/api/users/roles` | GET | 角色與模組權限表 |
+| `/api/audit-logs` | GET（`?from=&to=&user=&resource=&action=&record_id=&q=&limit=`） | 操作日誌（預設 200 筆，最多 1000） |
+| `/api/audit-logs/{id}` | GET | 含 before／after JSON |
+| `/api/reports/processing` | GET（`?from=&to=`） | 每月加工成本費率 |
+| `/api/reports/profit` | GET（`?from=&to=&group=product｜customer｜channel｜roasted_bean｜month`） | 毛利分析 |
+| `/api/reports/pnl` | GET（`?from=&to=&period=month｜quarter｜year`） | 損益概要 |
+| `/api/reports/loss` | GET（`?from=&to=&by=green｜roasted`） | 失重率分析（含逐月） |
+| `/api/reports/trace` | GET（`?lot_id=｜roasted_lot_id=`） | 批號追溯 |
+| `/api/reconcile` | GET | 各帳戶對帳概況 |
+| `/api/reconcile/{account_id}` | GET（`?from=&to=`） | 對帳單明細、系統收支、建議配對、餘額核對 |
+| `/api/reconcile/{account_id}/profile` | GET／PUT `{ mapping }` | CSV 欄位對應 |
+| `/api/reconcile/{account_id}/import` | POST `{ lines: [{ txn_date, direction, amount, description?, ref_no?, balance? }] }` | 匯入對帳單（最多 3000 筆，重複自動略過） |
+| `/api/reconcile/{account_id}/match` | POST `{ pairs: [{ line_id, txn_id }] }` | 確認配對 |
+| `/api/reconcile/{account_id}/unmatch` | POST `{ line_id｜txn_id }` | 取消配對／取消核對 |
+| `/api/reconcile/{account_id}/ignore` | POST `{ line_id, ignore }` | 忽略／取消忽略 |
+| `/api/reconcile/{account_id}/mark` | POST `{ txn_ids, reconciled }` | 不靠對帳單直接標記已核對 |
+| `/api/reconcile/{account_id}/lines` | DELETE（`?batch=｜line_id=`） | 刪除未對帳明細 |
+| `/api/import/{resource}` | GET／POST `{ rows, dry_run }` | 匯入範本欄位；檢查／匯入（錯誤回 400 `{ errors: [{ line, error }] }`） |
+| `/api/backup` | GET | 全部資料表 JSON（前端轉 Excel） |

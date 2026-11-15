@@ -343,6 +343,14 @@ export async function handleBank(id, request, env, user) {
   if (method === 'PUT') {
     const cur = await getTxn(db, tid);
     const body = await readJson(request);
+    // 已對帳（Phase 5）：不能改帳戶、日期、方向、金額；沖帳、摘要等仍可改
+    if (cur.reconciled || (cur.transfer_txn_id && (await db.prepare('SELECT reconciled FROM bank_transactions WHERE txn_id = ?').bind(cur.transfer_txn_id).first())?.reconciled)) {
+      const changed = (body.amount !== undefined && Math.abs(Number(body.amount) - cur.amount) >= 0.005)
+        || (body.txn_date && body.txn_date !== cur.txn_date)
+        || (!cur.transfer_txn_id && body.account_id && Number(body.account_id) !== cur.account_id)
+        || (!cur.transfer_txn_id && body.direction && body.direction !== cur.direction);
+      if (changed) throw new HttpError(409, `${cur.txn_no} 已對帳，不能修改帳戶、日期、方向或金額；要改請先到「銀行對帳」取消對帳`);
+    }
     if (cur.transfer_txn_id) {
       // 帳戶互轉：兩筆一起改（日期、金額、帳戶、摘要）
       const isOut = cur.direction === '出帳';
@@ -380,6 +388,8 @@ export async function handleBank(id, request, env, user) {
   if (method === 'DELETE') {
     const cur = await getTxn(db, tid);
     const ids = [tid, cur.transfer_txn_id].filter(Boolean);
+    const rec = await db.prepare(`SELECT txn_no FROM bank_transactions WHERE reconciled = 1 AND txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids).first();
+    if (rec) throw new HttpError(409, `${rec.txn_no} 已對帳，不能刪除；要刪請先到「銀行對帳」取消對帳`);
     await db.batch([
       db.prepare(`DELETE FROM payment_allocations WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),
       db.prepare(`UPDATE bank_transactions SET transfer_txn_id = NULL WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),

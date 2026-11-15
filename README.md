@@ -59,7 +59,7 @@
 | 後端 | Cloudflare Pages Functions（Workers） |
 | 資料庫 | Cloudflare D1（SQLite） |
 | 登入 | Cloudflare Access（Zero Trust） |
-| 匯出 | Excel（xlsx）、CSV（Phase 5） |
+| 匯出 | Excel（xlsx，前端 ExcelJS）；網銀對帳單 CSV 匯入 |
 
 介面為繁體中文；顏色慣例：**紅色 = 增加／入庫／入帳，綠色 = 減少／出庫／出帳**。金額一律新台幣。
 
@@ -110,11 +110,13 @@ pinncafe-erp/
 │   ├── index.js                # 路由
 │   ├── lib/                    # 共用工具、Cloudflare Access 驗證
 │   ├── master/                 # 主檔 API
-│   ├── transaction/            # 進貨、銷貨（之後：退貨）
-│   ├── inventory/              # 庫存查詢、烘焙批次、期初庫存（之後：盤點）
-│   └── finance/                # 銀行收支＋沖帳、費用、應收應付與費用分析
+│   ├── transaction/            # 進貨、銷貨、退貨、訂閱、發票
+│   ├── inventory/              # 庫存查詢、烘焙批次、期初庫存、盤點
+│   ├── finance/                # 銀行收支＋沖帳、費用、應收應付、費用分析、銀行對帳
+│   ├── reports/                # 毛利、損益、加工成本、失重率、批號追溯
+│   └── system/                 # 使用者與角色、操作日誌、主檔匯入、備份
 └── web/
-    └── admin/                  # 後台管理（之後：pos/、dashboard/）
+    └── admin/                  # 後台管理（vendor/ 放 ExcelJS）
 ```
 
 ---
@@ -128,7 +130,7 @@ pinncafe-erp/
 | 期初庫存 | 開帳時已有的生豆／包材直接登錄（不經進貨單） | ✅ 完成 |
 | Phase 3 | 銀行帳戶 ＋ 入帳／出帳 ＋ 收付款沖帳 ＋ 應收應付 ＋ 費用 ＋ 費用分析 | ✅ 完成 |
 | Phase 4 | 配方（包材耗用）、訂閱、退貨／折讓／退款、盤點與庫存調整、發票登錄 | ✅ 完成 |
-| Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 | |
+| Phase 5 | 成本／毛利報表、銀行對帳、權限、日誌、匯入匯出 | ✅ 完成 |
 
 ---
 
@@ -172,6 +174,8 @@ npm run db:remote:migrate:phase3    # Phase 3：依沖帳重算收付款狀態�
 
 Phase 4 升級：先 `npm run db:remote:migrate:phase4`（加兩個欄位，只能跑一次），再 `npm run db:remote:schema`。
 
+Phase 5 升級：只要 `npm run db:remote:schema`（新增四張表）。**要在部署新版之前跑**，否則登入時會找不到 users 表。
+
 每個 migration 只能跑一次。
 
 ### 開始使用 Phase 3
@@ -187,6 +191,13 @@ Phase 4 升級：先 `npm run db:remote:migrate:phase4`（加兩個欄位，只�
 3. 訂閱在「交易 → 訂閱」建立，每天（或每次出貨前）到待出貨清單勾選產生銷貨單
 4. 發票開好後在銷貨單上「登錄發票」，或到「交易 → 發票」補登未開發票的單
 5. 「庫存 → 盤點／調整」做月底盤點，試喝、樣品、報廢也在這裡扣
+
+### 開始使用 Phase 5
+
+1. 第一次登入的人自動成為管理者（MY）。要讓員工使用：「系統 → 使用者」新增 email 與角色，**並到 Cloudflare Zero Trust → Access 把該 email 加進允許名單**
+2. 費用勾選「攤入烘焙」後，「報表 → 加工成本」會算出每月每 kg 加工成本，「毛利分析」顯示扣掉加工成本後的調整後毛利
+3. 「財務 → 銀行對帳」選帳戶 → 匯入網銀下載的 CSV（第一次設定欄位對應）→ 確認建議配對；對帳單有、系統沒有的直接建立收支
+4. 每個查詢頁右上角「匯出 Excel」；「系統 → 匯入／備份」可下載主檔範本批次匯入，管理者可下載全部資料備份
 
 ### Phase 2 升級後的設定
 

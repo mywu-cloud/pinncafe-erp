@@ -1,7 +1,10 @@
 -- =============================================================
--- 範例資料（Phase 1～4，僅供開發測試）
+-- 範例資料（Phase 1～5，僅供開發測試）
 -- 執行前請先跑 schema.sql；重跑會先清空所有資料表
 -- =============================================================
+DELETE FROM bank_statement_lines;
+DELETE FROM bank_import_profiles;
+DELETE FROM audit_logs;
 DELETE FROM stock_count_items;
 DELETE FROM stock_counts;
 DELETE FROM invoices;
