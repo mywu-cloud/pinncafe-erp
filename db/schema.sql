@@ -8,6 +8,8 @@
 --          既有資料庫升級請先跑 db/migrations/003_opening_stock.sql 再跑本檔
 -- Phase 3：銀行帳戶、銀行收支、收付款沖帳、費用類別、費用支出
 --          既有資料庫升級：跑本檔後再跑 db/migrations/004_phase3.sql（重算收付款狀態）
+-- Phase 4：配方（包材）、退貨／折讓、發票、訂閱、盤點與庫存調整
+--          既有資料庫升級：先跑 db/migrations/005_phase4.sql（加欄位）再跑本檔
 -- 規格：ARCHITECTURE.md
 --
 -- 慣例
@@ -268,7 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_mv_ref  ON inventory_movements(ref_doc_type, ref_
 -- 單號流水號
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS doc_sequences (
-  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號、'R' 烘焙批次、'S' 銷貨單、'T' 銀行收支、'E' 費用
+  prefix  TEXT NOT NULL,     -- 'P' 進貨單、'L' 生豆批號、'R' 烘焙批次、'S' 銷貨單、'T' 銀行收支、'E' 費用、'RT' 退貨／折讓、'C' 盤點／調整
   ymd     TEXT NOT NULL,     -- 'YYYYMMDD'
   last_no INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (prefix, ymd)
@@ -359,7 +361,8 @@ CREATE TABLE IF NOT EXISTS sales (
   note           TEXT,
   created_by     TEXT,
   created_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
-  updated_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  subscription_id INTEGER REFERENCES subscriptions(subscription_id)   -- Phase 4：由訂閱產生
 );
 CREATE INDEX IF NOT EXISTS idx_sales_date     ON sales(sale_date);
 CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id);
@@ -380,8 +383,9 @@ CREATE TABLE IF NOT EXISTS sale_items (
   amount      REAL    NOT NULL,                       -- auto qty × unit_price
   deduct_kg   REAL    NOT NULL DEFAULT 0,             -- auto
   unit_cost   REAL    NOT NULL DEFAULT 0,             -- auto 每單位成本 = cost_amount ÷ qty
-  cost_amount REAL    NOT NULL DEFAULT 0,             -- auto
-  note        TEXT
+  cost_amount REAL    NOT NULL DEFAULT 0,             -- auto 熟豆成本 ＋ 包材成本
+  note        TEXT,
+  packaging_cost REAL NOT NULL DEFAULT 0              -- Phase 4：依配方扣的包材成本（已含在 cost_amount）
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_items_line ON sale_items(sale_id, line_no);
 CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
@@ -491,6 +495,146 @@ CREATE TABLE IF NOT EXISTS payment_allocations (
 );
 CREATE INDEX IF NOT EXISTS idx_alloc_txn ON payment_allocations(txn_id);
 CREATE INDEX IF NOT EXISTS idx_alloc_doc ON payment_allocations(doc_type, doc_id);
+
+-- =============================================================
+-- Phase 4
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- 2.6 配方（只放包材；熟豆仍依 products.roasted_bean_id × net_weight_g）
+--   銷貨存檔時：每包用量 × 數量 → 扣包材庫存（包裝耗用），成本算進銷貨成本
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS product_recipes (
+  recipe_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id   INTEGER NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
+  packaging_id INTEGER NOT NULL REFERENCES packaging_items(packaging_id),
+  qty          REAL    NOT NULL CHECK (qty > 0),           -- 每一個產品單位用幾個
+  UNIQUE (product_id, packaging_id)
+);
+
+-- -------------------------------------------------------------
+-- 3.6 訂閱
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS subscriptions (
+  subscription_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id     INTEGER NOT NULL REFERENCES customers(customer_id),
+  product_id      INTEGER NOT NULL REFERENCES products(product_id),
+  qty             INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0),
+  grind_size      TEXT CHECK (grind_size IS NULL OR grind_size IN ('原豆','手沖','義式','法壓','冷萃')),
+  unit_price      REAL    NOT NULL CHECK (unit_price >= 0),     -- 每期單價
+  shipping_fee    REAL    NOT NULL DEFAULT 0,
+  frequency       TEXT    NOT NULL DEFAULT '每月' CHECK (frequency IN ('每週','雙週','每月')),
+  next_ship_date  TEXT    NOT NULL,
+  start_date      TEXT    NOT NULL,
+  end_date        TEXT,
+  status          TEXT    NOT NULL DEFAULT '進行中' CHECK (status IN ('進行中','暫停','取消')),
+  channel         TEXT    NOT NULL DEFAULT 'LINE' CHECK (channel IN ('門市','電話','LINE','官網','蝦皮','批發')),
+  payment_method  TEXT    NOT NULL DEFAULT '轉帳' CHECK (payment_method IN ('現金','轉帳','LINE Pay','刷卡','貨到付款','月結')),
+  note            TEXT,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_subs_next ON subscriptions(status, next_ship_date);
+
+-- -------------------------------------------------------------
+-- 3.5 退貨／折讓
+--   return_no：自動產生 RT{YYYYMMDD}-{NN}
+--   銷貨退回／銷貨折讓 → sale_id；進貨退出 → purchase_id
+--   單據淨額 = 原單合計 − 退貨／折讓合計（收付款狀態依淨額計算）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS returns (
+  return_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_no    TEXT    NOT NULL UNIQUE,
+  return_date  TEXT    NOT NULL,
+  return_type  TEXT    NOT NULL CHECK (return_type IN ('銷貨退回','銷貨折讓','進貨退出')),
+  sale_id      INTEGER REFERENCES sales(sale_id),
+  purchase_id  INTEGER REFERENCES purchases(purchase_id),
+  restock      INTEGER NOT NULL DEFAULT 1 CHECK (restock IN (0,1)),   -- 銷貨退回是否回補熟豆庫存
+  total_amount REAL    NOT NULL CHECK (total_amount > 0),
+  cost_amount  REAL    NOT NULL DEFAULT 0,             -- 回補／退出的庫存成本
+  reason       TEXT,
+  note         TEXT,
+  created_by   TEXT,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_returns_date     ON returns(return_date);
+CREATE INDEX IF NOT EXISTS idx_returns_sale     ON returns(sale_id);
+CREATE INDEX IF NOT EXISTS idx_returns_purchase ON returns(purchase_id);
+
+CREATE TABLE IF NOT EXISTS return_items (
+  item_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_id        INTEGER NOT NULL REFERENCES returns(return_id) ON DELETE CASCADE,
+  line_no          INTEGER NOT NULL DEFAULT 1,
+  sale_item_id     INTEGER REFERENCES sale_items(item_id),         -- 銷貨退回
+  purchase_item_id INTEGER REFERENCES purchase_items(item_id),     -- 進貨退出
+  qty              REAL    NOT NULL CHECK (qty > 0),
+  unit_price       REAL    NOT NULL CHECK (unit_price >= 0),
+  amount           REAL    NOT NULL,
+  restock_kg       REAL    NOT NULL DEFAULT 0,          -- 銷貨退回回補的熟豆 kg
+  cost_amount      REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_return_items_return ON return_items(return_id);
+
+-- -------------------------------------------------------------
+-- 3.7 發票（手動登錄，實際開立在原本的發票平台）
+--   amount 含稅；sales_amount = 未稅、tax_amount = 稅額（5%）
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS invoices (
+  invoice_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  sale_id       INTEGER NOT NULL REFERENCES sales(sale_id),
+  invoice_no    TEXT    NOT NULL UNIQUE,
+  invoice_date  TEXT    NOT NULL,
+  invoice_type  TEXT    NOT NULL DEFAULT '電子發票' CHECK (invoice_type IN ('二聯','三聯','電子發票')),
+  buyer_tax_id  TEXT,
+  buyer_name    TEXT,
+  carrier       TEXT,
+  amount        REAL    NOT NULL CHECK (amount >= 0),
+  sales_amount  REAL    NOT NULL,
+  tax_amount    REAL    NOT NULL,
+  status        TEXT    NOT NULL DEFAULT '開立' CHECK (status IN ('開立','作廢','折讓')),
+  void_date     TEXT,
+  void_reason   TEXT,
+  note          TEXT,
+  created_by    TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(invoice_date);
+CREATE INDEX IF NOT EXISTS idx_invoices_sale ON invoices(sale_id);
+
+-- -------------------------------------------------------------
+-- 4.6 盤點／庫存調整
+--   count_no：自動產生 C{YYYYMMDD}-{NN}
+--   盤點：輸入實際數量 → 差異產生盤盈／盤虧異動
+--   調整：試喝／樣品／報廢 → 出庫異動
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS stock_counts (
+  count_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  count_no    TEXT    NOT NULL UNIQUE,
+  count_date  TEXT    NOT NULL,
+  count_type  TEXT    NOT NULL CHECK (count_type IN ('盤點','調整')),
+  item_type   TEXT    NOT NULL CHECK (item_type IN ('生豆','熟豆','包材')),
+  note        TEXT,
+  created_by  TEXT,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at  TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_counts_date ON stock_counts(count_date);
+
+CREATE TABLE IF NOT EXISTS stock_count_items (
+  item_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  count_id    INTEGER NOT NULL REFERENCES stock_counts(count_id) ON DELETE CASCADE,
+  item_ref_id INTEGER NOT NULL,                       -- 生豆批號／熟豆批次／包材
+  system_qty  REAL,                                   -- 盤點：帳面數量
+  actual_qty  REAL,                                   -- 盤點：實際數量
+  diff_qty    REAL    NOT NULL,                       -- 盤點：實際 − 帳面；調整：−出庫數量
+  reason      TEXT    NOT NULL CHECK (reason IN ('盤盈','盤虧','試喝','樣品','報廢')),
+  unit_cost   REAL    NOT NULL DEFAULT 0,
+  amount      REAL    NOT NULL DEFAULT 0,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_count_items_count ON stock_count_items(count_id);
 
 -- =============================================================
 -- VIEWS

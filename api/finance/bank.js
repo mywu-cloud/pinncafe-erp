@@ -1,8 +1,10 @@
 // 銀行收支（入帳／出帳／帳戶互轉）＋ 收付款沖帳
 // 規則（ARCHITECTURE.md 8.4）：
 //   1. 收款、付款一律手動登錄入帳／出帳，再選要沖銷的單據（payment_allocations）
-//      入帳 → 沖銷貨單；出帳 → 沖進貨單或費用
-//   2. 一筆收支可沖多張單，一張單也可分多次沖；沖帳合計不可超過收支金額，單筆沖帳不可超過單據未沖餘額
+//      入帳 → 沖銷貨單（收款）或進貨單（供應商退款）
+//      出帳 → 沖進貨單／費用（付款）或銷貨單（退款給客戶）
+//   2. 一筆收支可沖多張單，一張單也可分多次沖；沖帳合計不可超過收支金額；
+//      收付款不可超過單據未沖餘額（淨額 = 原單 − 退貨折讓），退款不可超過應退金額
 //   3. 單據收付款狀態依已沖金額自動更新（lib/payment.js）
 //   4. 帳戶互轉 = 來源帳戶出帳 ＋ 目的帳戶入帳（各一筆，transfer_txn_id 互指），不可沖帳
 //   5. 交易日期不可早於帳戶期初日期
@@ -10,7 +12,7 @@
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, lastSeq, seqStatement } from '../lib/docno.js';
-import { DOCS, totalCol, statusStatement } from '../lib/payment.js';
+import { DOCS, statusStatement, docBalance, paidExpr, netExpr } from '../lib/payment.js';
 
 export const DIRECTIONS = ['入帳', '出帳'];
 export const CATEGORIES = ['銷貨收款', '進貨付款', '費用', '轉帳', '手續費', '利息', '其他'];
@@ -31,14 +33,6 @@ const amountOf = (v) => {
   if (!Number.isFinite(n) || n <= 0) throw new HttpError(400, '金額必須大於 0');
   return n;
 };
-
-/** 單據已沖金額（排除某筆收支自己的沖帳） */
-async function allocatedOf(db, docType, docId, excludeTxnIds) {
-  const ex = excludeTxnIds.length ? `AND txn_id NOT IN (${excludeTxnIds.map(() => '?').join(',')})` : '';
-  const r = await db.prepare(`SELECT COALESCE(SUM(amount), 0) AS s FROM payment_allocations WHERE doc_type = ? AND doc_id = ? ${ex}`)
-    .bind(docType, docId, ...excludeTxnIds).first();
-  return r.s;
-}
 
 /** 驗證一般收支（非互轉）與沖帳 */
 async function prepare(db, body, { excludeTxnId = null } = {}) {
@@ -78,16 +72,16 @@ async function prepare(db, body, { excludeTxnId = null } = {}) {
     if (!Number.isFinite(amt) || amt < 0) throw new HttpError(400, `第 ${line} 筆沖帳：金額不可為負數`);
     const d = DOCS[a.doc_type];
     if (!d) throw new HttpError(400, `第 ${line} 筆沖帳：單據類型錯誤`);
-    if (body.direction === '入帳' && a.doc_type !== 'sales') throw new HttpError(400, '入帳只能沖銷貨單');
-    if (body.direction === '出帳' && a.doc_type === 'sales') throw new HttpError(400, '出帳只能沖進貨單或費用');
+    if (body.direction === '入帳' && a.doc_type === 'expenses') throw new HttpError(400, '入帳不能沖費用');
     const doc_id = toInt(a.doc_id, `第 ${line} 筆沖帳單據`);
     const key = `${a.doc_type}:${doc_id}`;
     if (seen.has(key)) throw new HttpError(400, '同一張單據請合併成一筆沖帳');
     seen.add(key);
-    const doc = await db.prepare(`SELECT ${d.no} AS no, ${totalCol(d)} AS total FROM ${d.table} WHERE ${d.pk} = ?`).bind(doc_id).first();
-    if (!doc) throw new HttpError(400, `第 ${line} 筆沖帳：${d.label}不存在`);
-    const remaining = round(doc.total - await allocatedOf(db, a.doc_type, doc_id, excludeTxnId ? [excludeTxnId] : []));
-    if (amt > remaining + EPS) throw new HttpError(409, `${d.label} ${doc.no} 未沖餘額只剩 ${remaining}，不可沖 ${amt}`);
+    const bal = await docBalance(db, a.doc_type, doc_id, excludeTxnId);
+    if (!bal) throw new HttpError(400, `第 ${line} 筆沖帳：${d.label}不存在`);
+    const isPay = body.direction === d.payDir; // 收付款；否則為退款
+    if (isPay && amt > bal.remaining + EPS) throw new HttpError(409, `${d.label} ${bal.no} 未沖餘額只剩 ${Math.max(0, bal.remaining)}，不可沖 ${amt}`);
+    if (!isPay && amt > bal.refundable + EPS) throw new HttpError(409, `${d.label} ${bal.no} 應退金額只有 ${Math.max(0, bal.refundable)}，不可退 ${amt}`);
     allocations.push({ doc_type: a.doc_type, doc_id, amount: amt });
   }
   const allocated = round(allocations.reduce((s, a) => s + a.amount, 0));
@@ -198,49 +192,51 @@ export async function handleBank(id, request, env, user) {
   const method = request.method;
 
   // ---- 可沖帳的未結單據 ----
-  //   入帳：未收清的銷貨單（可依客戶）；出帳：未付清的進貨單（可依供應商）＋ 未付清的費用
-  //   exclude_txn_id：修改收支時，把它自己的沖帳加回未沖餘額
+  //   入帳：未收清的銷貨單（可依客戶）＋ 供應商應退款的進貨單（可依供應商）
+  //   出帳：未付清的進貨單（可依供應商）＋ 未付清的費用 ＋ 應退客戶的銷貨單（可依客戶）
+  //   exclude_txn_id：修改收支時，把它自己的沖帳加回去；mine = 這筆收支原本沖的金額
   if (id === 'open-docs' && method === 'GET') {
     const dir = sp.get('direction');
     if (!DIRECTIONS.includes(dir)) throw new HttpError(400, 'direction 必須是 入帳／出帳');
     const ex = sp.get('exclude_txn_id') ? toInt(sp.get('exclude_txn_id'), '收支') : -1;
-    const paidSql = (t, pk) => `COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = '${t}' AND a.doc_id = ${pk} AND a.txn_id <> ${ex}), 0)`;
+    const cid = sp.get('customer_id');
+    const sid = sp.get('supplier_id');
     const mine = (t, pk) => `COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = '${t}' AND a.doc_id = ${pk} AND a.txn_id = ${ex}), 0)`;
+    // kind：pay = 收付款（餘額 = 淨額 − 已收付）；refund = 退款（餘額 = 已收付 − 淨額）
+    const query = async (t, kind, extraWhere, binds) => {
+      const d = DOCS[t];
+      const net = netExpr(t, 'x');
+      const paid = paidExpr(t, `x.${d.pk}`, { excludeTxn: ex });
+      const bal = kind === 'pay' ? `(${net} - ${paid})` : `(${paid} - ${net})`;
+      const sel = {
+        sales: `x.sale_no AS doc_no, x.sale_date AS doc_date, x.due_date, COALESCE(c.name, '散客') AS party, x.payment_method AS info FROM sales x LEFT JOIN customers c ON c.customer_id = x.customer_id`,
+        purchases: `x.purchase_no AS doc_no, x.purchase_date AS doc_date, x.due_date, s.name AS party, x.invoice_no AS info FROM purchases x JOIN suppliers s ON s.supplier_id = x.supplier_id`,
+        expenses: `x.expense_no AS doc_no, x.expense_date AS doc_date, x.due_date, COALESCE(x.vendor, '') AS party, c.name AS info FROM expenses x JOIN expense_categories c ON c.category_id = x.category_id`,
+      }[t];
+      const { results } = await db.prepare(
+        `SELECT '${t}' AS doc_type, '${kind}' AS kind, x.${d.pk} AS doc_id, ${net} AS total, ${paid} AS paid, ${bal} AS remaining, ${mine(t, `x.${d.pk}`)} AS mine, ${sel}
+         WHERE (${bal} > 0.005 OR ${mine(t, `x.${d.pk}`)} > 0) ${extraWhere}
+         ORDER BY doc_date, x.${d.pk}`,
+      ).bind(...binds).all();
+      return results;
+    };
+    const custWhere = cid === 'none' ? 'AND x.customer_id IS NULL' : cid ? 'AND x.customer_id = ?' : '';
+    const custBind = cid && cid !== 'none' ? [toInt(cid, '客戶')] : [];
+    const supWhere = sid ? 'AND x.supplier_id = ?' : '';
+    const supBind = sid ? [toInt(sid, '供應商')] : [];
     const docs = [];
     if (dir === '入帳') {
-      const cid = sp.get('customer_id');
-      const { results } = await db.prepare(
-        `SELECT 'sales' AS doc_type, s.sale_id AS doc_id, s.sale_no AS doc_no, s.sale_date AS doc_date, s.due_date, s.total_amount AS total,
-                c.name AS party, s.payment_method AS info, ${paidSql('sales', 's.sale_id')} AS paid, ${mine('sales', 's.sale_id')} AS mine
-         FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
-         WHERE (s.total_amount - ${paidSql('sales', 's.sale_id')} > 0.005 OR ${mine('sales', 's.sale_id')} > 0)
-         ${cid === 'none' ? 'AND s.customer_id IS NULL' : cid ? 'AND s.customer_id = ?' : ''}
-         ORDER BY s.sale_date, s.sale_id`,
-      ).bind(...(cid && cid !== 'none' ? [toInt(cid, '客戶')] : [])).all();
-      docs.push(...results);
+      docs.push(...await query('sales', 'pay', custWhere, custBind));
+      if (!cid) docs.push(...await query('purchases', 'refund', supWhere, supBind));
     } else {
-      const sid = sp.get('supplier_id');
-      const { results: p } = await db.prepare(
-        `SELECT 'purchases' AS doc_type, p.purchase_id AS doc_id, p.purchase_no AS doc_no, p.purchase_date AS doc_date, p.due_date, p.total_amount AS total,
-                s.name AS party, p.invoice_no AS info, ${paidSql('purchases', 'p.purchase_id')} AS paid, ${mine('purchases', 'p.purchase_id')} AS mine
-         FROM purchases p JOIN suppliers s ON s.supplier_id = p.supplier_id
-         WHERE (p.total_amount - ${paidSql('purchases', 'p.purchase_id')} > 0.005 OR ${mine('purchases', 'p.purchase_id')} > 0)
-         ${sid ? 'AND p.supplier_id = ?' : ''}
-         ORDER BY p.purchase_date, p.purchase_id`,
-      ).bind(...(sid ? [toInt(sid, '供應商')] : [])).all();
-      docs.push(...p);
-      if (sp.get('include_expenses') !== '0') {
-        const { results: e } = await db.prepare(
-          `SELECT 'expenses' AS doc_type, e.expense_id AS doc_id, e.expense_no AS doc_no, e.expense_date AS doc_date, e.due_date, e.amount AS total,
-                  COALESCE(e.vendor, '') AS party, c.name AS info, ${paidSql('expenses', 'e.expense_id')} AS paid, ${mine('expenses', 'e.expense_id')} AS mine
-           FROM expenses e JOIN expense_categories c ON c.category_id = e.category_id
-           WHERE (e.amount - ${paidSql('expenses', 'e.expense_id')} > 0.005 OR ${mine('expenses', 'e.expense_id')} > 0)
-           ORDER BY e.expense_date, e.expense_id`,
-        ).all();
-        docs.push(...e);
-      }
+      if (!cid) docs.push(...await query('purchases', 'pay', supWhere, supBind));
+      if (sp.get('include_expenses') !== '0' && !sid && !cid) docs.push(...await query('expenses', 'pay', '', []));
+      if (!sid) docs.push(...await query('sales', 'refund', custWhere, custBind));
     }
-    for (const d of docs) { d.paid = round(d.paid); d.mine = round(d.mine); d.remaining = round(d.total - d.paid); d.label = DOCS[d.doc_type].label; }
+    for (const d of docs) {
+      d.total = round(d.total); d.paid = round(d.paid); d.mine = round(d.mine); d.remaining = round(Math.max(0, d.remaining));
+      d.label = d.kind === 'refund' ? (d.doc_type === 'sales' ? '退款給客戶' : '供應商退款') : DOCS[d.doc_type].label;
+    }
     return json({ data: docs });
   }
 

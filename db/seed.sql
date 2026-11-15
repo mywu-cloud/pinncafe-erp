@@ -1,7 +1,12 @@
 -- =============================================================
--- 範例資料（Phase 1～3，僅供開發測試）
+-- 範例資料（Phase 1～4，僅供開發測試）
 -- 執行前請先跑 schema.sql；重跑會先清空所有資料表
 -- =============================================================
+DELETE FROM stock_count_items;
+DELETE FROM stock_counts;
+DELETE FROM invoices;
+DELETE FROM return_items;
+DELETE FROM returns;
 DELETE FROM payment_allocations;
 DELETE FROM bank_transactions;
 DELETE FROM bank_accounts;
@@ -18,6 +23,9 @@ DELETE FROM purchases;
 DELETE FROM doc_sequences;
 DELETE FROM customer_preferences;
 DELETE FROM customers;
+DELETE FROM product_recipes;
+UPDATE sales SET subscription_id = NULL;
+DELETE FROM subscriptions;
 DELETE FROM products;
 DELETE FROM roasted_beans;
 DELETE FROM packaging_items;
@@ -189,6 +197,24 @@ INSERT INTO payment_allocations (txn_id, doc_type, doc_id, amount) VALUES
  (2, 'sales', 1, 1040),
  (3, 'purchases', 1, 20000);
 UPDATE purchases SET payment_status = '部分付款' WHERE purchase_id = 1;
+
+-- =============================================================
+-- Phase 4：配方、訂閱、發票（退貨、盤點請在後台操作測試）
+-- =============================================================
+INSERT INTO product_recipes (product_id, packaging_id, qty) VALUES
+ (1, 1, 1), (1, 2, 1),
+ (2, 1, 1), (2, 2, 1),
+ (3, 1, 1), (3, 2, 1),
+ (4, 2, 1),
+ (5, 3, 10), (5, 2, 1);
+
+INSERT INTO subscriptions (subscription_id, customer_id, product_id, qty, grind_size, unit_price, shipping_fee, frequency, next_ship_date, start_date, end_date, status, channel, payment_method, note) VALUES
+ (1, 4, 1, 2, '手沖', 468, 0,  '每月', '2026-11-15', '2026-10-15', NULL, '進行中', 'LINE', '轉帳', '每月兩包耶加雪菲'),
+ (2, 3, 3, 10, '原豆', 300, 100, '雙週', '2026-11-20', '2026-11-06', NULL, '進行中', '官網', '月結', NULL);
+
+INSERT INTO invoices (sale_id, invoice_no, invoice_date, invoice_type, buyer_tax_id, buyer_name, carrier, amount, sales_amount, tax_amount, status, created_by) VALUES
+ (1, 'AB12345678', '2026-11-11', '電子發票', NULL, NULL, '/ABC1234', 1040, 990, 50, '開立', 'seed'),
+ (2, 'AB12345679', '2026-11-13', '三聯', '87654321', '巷口咖啡館', NULL, 6450, 6143, 307, '開立', 'seed');
 
 -- ---------- 流水號 ----------
 INSERT INTO doc_sequences (prefix, ymd, last_no) VALUES

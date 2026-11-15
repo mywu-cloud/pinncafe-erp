@@ -8,13 +8,15 @@
 //   5. 明細記錄出貨當下成本（cost_amount、unit_cost）供毛利計算
 //   6. 收款狀態（Phase 3）：一律由收款沖帳決定（銀行收支入帳 → 沖銷售單），不能手動指定。
 //      已沖帳的銷貨單仍可修改；改後金額小於已收 → 標示溢收。有沖帳的銷貨單不可刪除。
-//   7. 包材耗用（配方）在 Phase 4
+//   7. 包材耗用（Phase 4）：產品有配方 → 每包用量 × 數量扣包材庫存（包裝耗用），
+//      成本 = 包材移動平均成本，記在 packaging_cost 並加進 cost_amount；包材不足比照熟豆提醒後可存
+//   8. 有退貨／折讓的銷貨單不可修改或刪除（請先刪除退貨單）；有未作廢發票的銷貨單不可刪除
 // 修改 = 整張重寫明細與異動，FIFO 重新計算。表頭、明細、異動在同一個 D1 batch（單一交易）。
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
 import { GRIND_SIZES } from '../master/resources.js';
-import { statusStatement, docPayments } from '../lib/payment.js';
+import { statusStatement, docPayments, docReturns, paidExpr, returnsExpr } from '../lib/payment.js';
 
 export const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
 export const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
@@ -119,17 +121,51 @@ async function prepare(db, body, { excludeSaleId = null, keepNo = null } = {}) {
       // 不足：記在「銷貨日前最近一批」；沒有的話記在最早一批；完全沒有批次 → 不扣庫存
       const fallback = usable[usable.length - 1] || lots[0] || null;
       shortages.push({
-        line_no: it.line_no, product_name: it.product_name, roasted_bean_name: it.roasted_bean_name,
+        type: '熟豆', line_no: it.line_no, product_name: it.product_name, roasted_bean_name: it.roasted_bean_name,
         need_kg: it.deduct_kg, short_kg: need, batch_no: fallback?.batch_no || null,
       });
       if (fallback) take(it, fallback, need);
     }
     for (const a of it.allocs) a.amount = round(a.kg * a.unit_cost);
     it.cost_amount = round(it.allocs.reduce((s, a) => s + a.amount, 0));
+  }
+
+  // ---- 配方：扣包材（Phase 4）----
+  const productIds = [...new Set(items.map((it) => it.product_id))];
+  const { results: recipeRows } = await db.prepare(
+    `SELECT r.product_id, r.packaging_id, r.qty, k.name, k.unit, k.unit_cost AS ref_cost
+     FROM product_recipes r JOIN packaging_items k ON k.packaging_id = r.packaging_id
+     WHERE r.product_id IN (${productIds.map(() => '?').join(',')})`,
+  ).bind(...productIds).all();
+  const packStock = new Map(); // packaging_id → { qty, cost }（不含本單原本的耗用）
+  for (const pid of new Set(recipeRows.map((r) => r.packaging_id))) {
+    const st = await db.prepare(
+      `SELECT COALESCE(SUM(qty), 0) AS qty, COALESCE(SUM(amount), 0) AS amount FROM inventory_movements
+       WHERE item_type = '包材' AND item_ref_id = ? AND (ref_doc_type IS NOT 'sales' OR ref_doc_id IS NOT ?)`,
+    ).bind(pid, excludeSaleId ?? -1).first();
+    const ref = recipeRows.find((r) => r.packaging_id === pid);
+    // 移動平均成本；沒有庫存時用包材主檔參考單價
+    const cost = st.qty > EPS ? round(st.amount / st.qty, 4) : (ref.ref_cost || 0);
+    packStock.set(pid, { qty: st.qty, cost, name: ref.name, unit: ref.unit });
+  }
+  for (const it of items) {
+    it.packs = [];
+    for (const r of recipeRows.filter((x) => x.product_id === it.product_id)) {
+      const ps = packStock.get(r.packaging_id);
+      const need = round(r.qty * it.qty, 3);
+      if (need > ps.qty + EPS) {
+        shortages.push({ type: '包材', line_no: it.line_no, product_name: it.product_name, packaging_name: ps.name, unit: ps.unit, need_qty: need, short_qty: round(need - Math.max(0, ps.qty), 3) });
+      }
+      ps.qty = round(ps.qty - need, 3);
+      it.packs.push({ packaging_id: r.packaging_id, qty: need, unit_cost: ps.cost, amount: round(need * ps.cost) });
+    }
+    it.packaging_cost = round(it.packs.reduce((s, x) => s + x.amount, 0));
+    it.cost_amount = round(it.cost_amount + it.packaging_cost);
     it.unit_cost = round(it.cost_amount / it.qty, 4);
   }
+
   if (shortages.length && body.allow_shortage !== true) {
-    throw new HttpError(409, '熟豆庫存不足', { code: 'SHORTAGE', shortages });
+    throw new HttpError(409, '庫存不足', { code: 'SHORTAGE', shortages });
   }
 
   const subtotal = round(items.reduce((s, it) => s + it.amount, 0));
@@ -154,6 +190,7 @@ async function prepare(db, body, { excludeSaleId = null, keepNo = null } = {}) {
       payment_method,
       due_date: body.due_date || null,
       note: (body.note || '').trim() || null,
+      subscription_id: body.subscription_id ? Number(body.subscription_id) : null,
     },
     items, ymd, sLast, shortages,
   };
@@ -168,9 +205,15 @@ function itemStatements(db, p, user) {
   const stmts = [];
   for (const it of p.items) {
     stmts.push(db.prepare(
-      `INSERT INTO sale_items (sale_id, line_no, product_id, grind_size, qty, unit_price, amount, deduct_kg, unit_cost, cost_amount, note)
-       VALUES (${SID}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(h.sale_no, it.line_no, it.product_id, it.grind_size, it.qty, it.unit_price, it.amount, it.deduct_kg, it.unit_cost, it.cost_amount, it.note));
+      `INSERT INTO sale_items (sale_id, line_no, product_id, grind_size, qty, unit_price, amount, deduct_kg, unit_cost, cost_amount, packaging_cost, note)
+       VALUES (${SID}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(h.sale_no, it.line_no, it.product_id, it.grind_size, it.qty, it.unit_price, it.amount, it.deduct_kg, it.unit_cost, it.cost_amount, it.packaging_cost, it.note));
+    for (const k of it.packs) {
+      stmts.push(db.prepare(
+        `INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement_type, qty, unit_cost, amount, ref_doc_type, ref_doc_id, ref_item_id, note, created_by)
+         VALUES (?, '包材', ?, '包裝耗用', ?, ?, ?, 'sales', ${SID}, ${IID}, ?, ?)`,
+      ).bind(mvDate, k.packaging_id, -k.qty, k.unit_cost, -k.amount, h.sale_no, h.sale_no, it.line_no, h.sale_no, user));
+    }
     for (const a of it.allocs) {
       stmts.push(db.prepare(
         `INSERT INTO inventory_movements (movement_date, item_type, item_ref_id, movement_type, qty, unit_cost, amount, ref_doc_type, ref_doc_id, ref_item_id, note, created_by)
@@ -180,6 +223,23 @@ function itemStatements(db, p, user) {
   }
   if (p.sLast > 0) stmts.push(seqStatement(db, 'S', p.ymd, p.sLast));
   return stmts;
+}
+
+/** 新增銷貨單（訂閱出貨也用這個）。extra：一起放進同一個 batch 的語句 */
+export async function createSale(db, body, user, extra = []) {
+  const p = await prepare(db, body);
+  const h = p.header;
+  await db.batch([
+    db.prepare(
+      `INSERT INTO sales (sale_no, sale_date, customer_id, channel, subtotal, discount, shipping_fee, total_amount, cost_amount, payment_method, payment_status, due_date, note, subscription_id, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '未收', ?, ?, ?, ?)`,
+    ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.due_date, h.note, h.subscription_id, user),
+    ...itemStatements(db, p, user),
+    db.prepare(`UPDATE sales SET payment_status = '已收清' WHERE sale_no = ? AND total_amount <= 0.005`).bind(h.sale_no),
+    ...extra,
+  ]);
+  const row = await db.prepare('SELECT sale_id FROM sales WHERE sale_no = ?').bind(h.sale_no).first();
+  return { data: await getSale(db, row.sale_id), shortages: p.shortages };
 }
 
 async function getSale(db, id) {
@@ -202,16 +262,25 @@ async function getSale(db, id) {
      WHERE m.ref_doc_type = 'sales' AND m.ref_doc_id = ? AND m.item_type = '熟豆'
      ORDER BY m.movement_id`,
   ).bind(id).all();
+  const { results: packs } = await db.prepare(
+    `SELECT m.ref_item_id AS item_id, m.item_ref_id AS packaging_id, k.name, k.unit, -m.qty AS qty, -m.amount AS amount
+     FROM inventory_movements m JOIN packaging_items k ON k.packaging_id = m.item_ref_id
+     WHERE m.ref_doc_type = 'sales' AND m.ref_doc_id = ? AND m.item_type = '包材' ORDER BY m.movement_id`,
+  ).bind(id).all();
   for (const it of items) {
+    it.packs = packs.filter((k) => k.item_id === it.item_id);
     it.lots = allocs.filter((a) => a.item_id === it.item_id);
     // 應扣但沒扣到的量（存檔當時沒有任何烘焙批次）
     it.undeducted_kg = round(Math.max(0, it.deduct_kg - it.lots.reduce((s, a) => s + a.kg, 0)), 3);
   }
   header.items = items;
   header.gross_profit = round(header.subtotal - header.discount - header.cost_amount);
-  Object.assign(header, await docPayments(db, 'sales', id));
-  header.unpaid_amount = round(Math.max(0, header.total_amount - header.paid_amount));
-  header.overpaid = round(Math.max(0, header.paid_amount - header.total_amount));
+  Object.assign(header, await docPayments(db, 'sales', id), await docReturns(db, 'sales', id));
+  header.net_amount = round(header.total_amount - header.returned_amount);
+  header.unpaid_amount = round(Math.max(0, header.net_amount - header.paid_amount));
+  header.overpaid = round(Math.max(0, header.paid_amount - header.net_amount)); // 應退客戶
+  const { results: invoices } = await db.prepare('SELECT * FROM invoices WHERE sale_id = ? ORDER BY invoice_id').bind(id).all();
+  header.invoices = invoices;
   return header;
 }
 
@@ -296,7 +365,9 @@ export async function handleSales(id, request, env, user) {
       `SELECT s.*, c.name AS customer_name,
               (SELECT COUNT(*) FROM sale_items x WHERE x.sale_id = s.sale_id) AS item_count,
               (SELECT COALESCE(SUM(x.deduct_kg), 0) FROM sale_items x WHERE x.sale_id = s.sale_id) AS roasted_kg,
-              COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = 'sales' AND a.doc_id = s.sale_id), 0) AS paid_amount
+              ${paidExpr('sales', 's.sale_id')} AS paid_amount,
+              ${returnsExpr('sales', 's.sale_id')} AS returned_amount,
+              (SELECT invoice_no FROM invoices i WHERE i.sale_id = s.sale_id AND i.status <> '作廢' ORDER BY i.invoice_id DESC LIMIT 1) AS invoice_no
        FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
        ${f.where.length ? 'WHERE ' + f.where.join(' AND ') : ''}
        ORDER BY s.sale_date DESC, s.sale_id DESC`,
@@ -304,8 +375,10 @@ export async function handleSales(id, request, env, user) {
     for (const r of results) {
       r.gross_profit = round(r.subtotal - r.discount - r.cost_amount);
       r.paid_amount = round(r.paid_amount);
-      r.unpaid_amount = round(Math.max(0, r.total_amount - r.paid_amount));
-      r.overpaid = round(Math.max(0, r.paid_amount - r.total_amount));
+      r.returned_amount = round(r.returned_amount);
+      r.net_amount = round(r.total_amount - r.returned_amount);
+      r.unpaid_amount = round(Math.max(0, r.net_amount - r.paid_amount));
+      r.overpaid = round(Math.max(0, r.paid_amount - r.net_amount));
     }
     const summary = {
       count: results.length,
@@ -320,18 +393,7 @@ export async function handleSales(id, request, env, user) {
 
   // ---- 新增 ----
   if (!id && method === 'POST') {
-    const p = await prepare(db, await readJson(request));
-    const h = p.header;
-    await db.batch([
-      db.prepare(
-        `INSERT INTO sales (sale_no, sale_date, customer_id, channel, subtotal, discount, shipping_fee, total_amount, cost_amount, payment_method, payment_status, due_date, note, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '未收', ?, ?, ?)`,
-      ).bind(h.sale_no, h.sale_date, h.customer_id, h.channel, h.subtotal, h.discount, h.shipping_fee, h.total_amount, h.cost_amount, h.payment_method, h.due_date, h.note, user),
-      ...itemStatements(db, p, user),
-      db.prepare(`UPDATE sales SET payment_status = '已收清' WHERE sale_no = ? AND total_amount <= 0.005`).bind(h.sale_no),
-    ]);
-    const row = await db.prepare('SELECT sale_id FROM sales WHERE sale_no = ?').bind(h.sale_no).first();
-    return json({ data: await getSale(db, row.sale_id), shortages: p.shortages }, 201);
+    return json(await createSale(db, await readJson(request), user), 201);
   }
 
   if (!id) throw new HttpError(405, '不支援的操作');
@@ -342,7 +404,10 @@ export async function handleSales(id, request, env, user) {
   // ---- 修改：整張重寫明細與異動（FIFO 重新計算）----
   if (method === 'PUT') {
     const cur = await getSale(db, sid);
-    const p = await prepare(db, await readJson(request), { excludeSaleId: sid, keepNo: cur.sale_no });
+    if (cur.returns.length) throw new HttpError(409, `這張銷貨單已有退貨／折讓（${cur.returns.map((r) => r.return_no).join('、')}），無法修改，請先刪除退貨單`);
+    const body = await readJson(request);
+    if (cur.subscription_id && body.subscription_id === undefined) body.subscription_id = cur.subscription_id;
+    const p = await prepare(db, body, { excludeSaleId: sid, keepNo: cur.sale_no });
     const h = p.header;
     await db.batch([
       ...clearStatements(db, sid),
@@ -360,6 +425,9 @@ export async function handleSales(id, request, env, user) {
   if (method === 'DELETE') {
     const cur = await getSale(db, sid);
     if (cur.payments.length) throw new HttpError(409, `這張銷貨單已有 ${cur.payments.length} 筆收款沖帳（${cur.payments.map((x) => x.txn_no).join('、')}），請先到銀行收支刪除沖帳`);
+    if (cur.returns.length) throw new HttpError(409, `這張銷貨單已有退貨／折讓（${cur.returns.map((r) => r.return_no).join('、')}），請先刪除退貨單`);
+    const inv = cur.invoices.filter((i) => i.status !== '作廢');
+    if (inv.length) throw new HttpError(409, `這張銷貨單已開立發票 ${inv.map((i) => i.invoice_no).join('、')}，請先作廢或刪除發票`);
     await db.batch([
       ...clearStatements(db, sid),
       db.prepare('DELETE FROM sales WHERE sale_id = ?').bind(sid),

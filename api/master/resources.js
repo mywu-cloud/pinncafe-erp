@@ -36,7 +36,7 @@ export const resources = {
       birthday: { type: 'date' }, source: { type: 'text' }, note: { type: 'text' },
       is_active: { type: 'bool', default: 1 },
     },
-    refs: [['sales', 'customer_id', '銷貨單'], ['bank_transactions', 'customer_id', '銀行收支']],
+    refs: [['sales', 'customer_id', '銷貨單'], ['bank_transactions', 'customer_id', '銀行收支'], ['subscriptions', 'customer_id', '訂閱']],
   },
   'green-beans': {
     table: 'green_beans', pk: 'bean_id', label: '生豆品項',
@@ -73,7 +73,7 @@ export const resources = {
     },
     joins: 'LEFT JOIN suppliers s ON s.supplier_id = t.supplier_id',
     joinCols: 's.name AS supplier_name',
-    refs: [['purchase_items', 'packaging_id', '進貨明細']],
+    refs: [['purchase_items', 'packaging_id', '進貨明細'], ['product_recipes', 'packaging_id', '產品配方']],
   },
   products: {
     table: 'products', pk: 'product_id', label: '產品',
@@ -99,7 +99,7 @@ export const resources = {
       }
       return null;
     },
-    refs: [['sale_items', 'product_id', '銷貨明細']],
+    refs: [['sale_items', 'product_id', '銷貨明細'], ['subscriptions', 'product_id', '訂閱']],
   },
   'roasted-beans': {
     table: 'roasted_beans', pk: 'roasted_bean_id', label: '熟豆品項',

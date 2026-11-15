@@ -9,7 +9,7 @@
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
-import { statusStatement, docPayments } from '../lib/payment.js';
+import { statusStatement, docPayments, docReturns, paidExpr, returnsExpr } from '../lib/payment.js';
 
 /** 驗證輸入並算出所有 auto 欄位 */
 async function prepare(db, body, { excludePurchaseId = null } = {}) {
@@ -173,8 +173,10 @@ async function getPurchase(db, id) {
   ).bind(id).all();
   header.items = items;
   header.locked = items.some((it) => (it.other_movement_count || 0) > 0);
-  Object.assign(header, await docPayments(db, 'purchases', id));
-  header.unpaid_amount = round(Math.max(0, header.total_amount - header.paid_amount));
+  Object.assign(header, await docPayments(db, 'purchases', id), await docReturns(db, 'purchases', id));
+  header.net_amount = round(header.total_amount - header.returned_amount);
+  header.unpaid_amount = round(Math.max(0, header.net_amount - header.paid_amount));
+  header.refundable = round(Math.max(0, header.paid_amount - header.net_amount)); // 供應商應退
   return header;
 }
 
@@ -230,12 +232,17 @@ export async function handlePurchases(id, request, env, user) {
       `SELECT p.*, s.name AS supplier_name,
               (SELECT COUNT(*) FROM purchase_items x WHERE x.purchase_id = p.purchase_id) AS item_count,
               (SELECT COALESCE(SUM(x.qty), 0) FROM purchase_items x WHERE x.purchase_id = p.purchase_id AND x.item_type = '生豆') AS bean_kg,
-              COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = 'purchases' AND a.doc_id = p.purchase_id), 0) AS paid_amount
+              ${paidExpr('purchases', 'p.purchase_id')} AS paid_amount,
+              ${returnsExpr('purchases', 'p.purchase_id')} AS returned_amount
        FROM purchases p JOIN suppliers s ON s.supplier_id = p.supplier_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY p.purchase_date DESC, p.purchase_id DESC`,
     ).bind(...binds).all();
-    for (const r of results) { r.paid_amount = round(r.paid_amount); r.unpaid_amount = round(Math.max(0, r.total_amount - r.paid_amount)); }
+    for (const r of results) {
+      r.paid_amount = round(r.paid_amount);
+      r.net_amount = round(r.total_amount - r.returned_amount);
+      r.unpaid_amount = round(Math.max(0, r.net_amount - r.paid_amount));
+    }
     const summary = {
       count: results.length,
       total_amount: round(results.reduce((s, r) => s + r.total_amount, 0)),

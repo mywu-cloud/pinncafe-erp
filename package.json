@@ -8,6 +8,7 @@
     "db:remote:migrate:phase2": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/002_phase2.sql",
     "db:remote:migrate:opening": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/003_opening_stock.sql",
     "db:remote:migrate:phase3": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/004_phase3.sql",
+    "db:remote:migrate:phase4": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/005_phase4.sql",
     "db:remote:seed": "wrangler d1 execute pinncafe-erp --remote --file=db/seed.sql",
     "dev": "wrangler pages dev",
     "deploy": "wrangler pages deploy"

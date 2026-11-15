@@ -3,7 +3,7 @@
 > 本文件為 [README.md](./README.md) 的詳細規格。
 > 欄位標記：**PK** 主鍵、**FK** 外鍵、**IDX** 建議索引、`auto` 系統自動計算
 >
-> **實作狀態**：Phase 1～3 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存）、[第 14 節](#14-phase-3-實作決議)（Phase 3），各表欄位也已同步更新。
+> **實作狀態**：Phase 1～4 已完成（建表語法見 `db/schema.sql`；既有資料庫升級見 `db/migrations/`）。實作決議與對原規格的調整集中記錄在 [第 11 節](#11-phase-1-實作決議)（Phase 1）與 [第 12 節](#12-phase-2-實作決議)（Phase 2）、[第 13 節](#13-期初庫存)（期初庫存）、[第 14 節](#14-phase-3-實作決議)（Phase 3）、[第 15 節](#15-phase-4-實作決議)（Phase 4），各表欄位也已同步更新。
 > 技術選型：Cloudflare Pages（前端）＋ Pages Functions／Workers（API）＋ D1（SQLite）。
 
 ---
@@ -24,6 +24,7 @@
 12. [Phase 2 實作決議](#12-phase-2-實作決議)
 13. [期初庫存](#13-期初庫存)
 14. [Phase 3 實作決議](#14-phase-3-實作決議)
+15. [Phase 4 實作決議](#15-phase-4-實作決議)
 
 ---
 
@@ -37,20 +38,20 @@
 | | 產品 products | 原規劃 |
 | | 生豆品項 green_beans | **新增** |
 | | 熟豆品項 roasted_beans | **新增**（Phase 2：烘焙產出的熟豆，產品指定使用哪個熟豆） |
-| | 配方 product_recipes | **新增** |
+| | 配方 product_recipes | **新增**（Phase 4 完成） |
 | | 包材 packaging_items | **新增**（主檔與進貨已提前至 Phase 1） |
 | | 銀行帳戶 bank_accounts | **新增**（Phase 3 完成） |
 | 交易 | 進貨 purchases / purchase_items | 原規劃（Phase 1 完成） |
 | | 銷貨 sales / sale_items | 原規劃（Phase 2 完成） |
-| | 退貨／折讓 returns / return_items | **新增** |
-| | 訂閱訂單 subscriptions | **新增** |
-| | 發票 invoices | **新增** |
+| | 退貨／折讓 returns / return_items | **新增**（Phase 4 完成） |
+| | 訂閱訂單 subscriptions | **新增**（Phase 4 完成） |
+| | 發票 invoices | **新增**（Phase 4 完成） |
 | 庫存與生產 | 生豆庫存 green_bean_lots | 原規劃（改為批號制） |
 | | 烘焙批次 roast_batches / roast_batch_inputs | **新增**（Phase 2 完成） |
 | | 熟豆庫存 roasted_lots | **新增**（Phase 2 完成） |
 | | 庫存異動 inventory_movements | **新增** |
-| | 盤點 stock_counts / stock_count_items | **新增** |
-| | 單號流水號 doc_sequences | **新增**（Phase 1；Phase 2 加入 R、S；Phase 3 加入 T、E） |
+| | 盤點 stock_counts / stock_count_items | **新增**（Phase 4 完成） |
+| | 單號流水號 doc_sequences | **新增**（Phase 1；Phase 2 加入 R、S；Phase 3 加入 T、E；Phase 4 加入 RT、C） |
 | 財務 | 銀行收支 bank_transactions | 原規劃（Phase 3 完成） |
 | | 收付款沖帳 payment_allocations | **新增**（Phase 3 完成） |
 | | 費用支出 expenses | **新增**（Phase 3 完成） |
@@ -153,17 +154,16 @@
 
 > 同一鍋熟豆可包成不同規格：「招牌綜合 250g」與「招牌綜合 1kg」是兩個產品，但指向同一個熟豆品項、共用同一份熟豆庫存。
 
-### 2.6 配方 `product_recipes`（產品 BOM）
+### 2.6 配方 `product_recipes`（產品 BOM；Phase 4 已實作，只放包材）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | recipe_id | PK | |
-| product_id | FK → products | 產品 |
-| component_type | enum | 熟豆／包材 |
-| component_id | FK | 對應 green_beans 或 packaging_items |
-| qty | decimal | 用量（熟豆 g、包材 個） |
+| product_id | FK → products | 產品（刪除產品時一併刪除） |
+| packaging_id | FK → packaging_items | 包材（同一產品不重複） |
+| qty | decimal | 每一個產品單位用幾個 |
 
-> 例：「招牌綜合 250g」= 巴西 150g + 哥倫比亞 100g + 夾鏈袋 1 個 + 標籤 1 張
+> 例：「耶加雪菲 濾掛 10入」= 濾掛袋 10 個 ＋ 標籤 1 張。熟豆**不在配方裡**，仍依 `products.roasted_bean_id × net_weight_g` 扣（見第 15 節）。原規格的 component_type／component_id 簡化掉。
 
 ### 2.7 包材 `packaging_items`
 
@@ -277,7 +277,10 @@
 | created_by | text | 操作者 email |
 | created_at / updated_at | datetime | |
 
-> 毛利 = 小計 − 折扣 − 成本（不含運費）。`invoice_id`、`subscription_id` 於 Phase 4 加入。
+| subscription_id | FK → subscriptions | 由訂閱產生的銷貨單（Phase 4） |
+
+> 毛利 = 小計 − 折扣 − 成本（不含運費）。成本含熟豆與包材（Phase 4）。發票改由 `invoices.sale_id` 關聯，不在銷貨單上放 invoice_id。
+> 應收淨額 = 合計 − 退貨／折讓（Phase 4）。
 
 ### 3.4 銷貨明細 `sale_items`
 
@@ -292,7 +295,8 @@
 | unit_price | decimal | 單價 |
 | amount | decimal `auto` | 小計 = 數量 × 單價 |
 | deduct_kg | decimal `auto` | 應扣熟豆 kg = 數量 × 產品每包淨重 ÷ 1000（產品未指定熟豆品項 → 0） |
-| cost_amount | decimal `auto` | 本筆成本 = Σ（扣的各批 kg × 該批每 kg 成本） |
+| cost_amount | decimal `auto` | 本筆成本 = Σ（扣的各批 kg × 該批每 kg 成本）＋ packaging_cost |
+| packaging_cost | decimal `auto` | 依配方扣的包材成本（移動平均成本，Phase 4） |
 | unit_cost | decimal `auto` | 每包成本 = cost_amount ÷ qty（算毛利用） |
 | note | text | |
 
@@ -300,50 +304,61 @@
 
 > **客戶購買紀錄** = `sales JOIN sale_items WHERE customer_id = ?`，不另建表。
 
-### 3.5 退貨／折讓 `returns` / `return_items`
+### 3.5 退貨／折讓 `returns` / `return_items`（Phase 4 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | return_id | PK | |
-| return_date | date **IDX** | |
-| return_type | enum | 銷貨退回／銷貨折讓／進貨退出 |
-| ref_sale_id / ref_purchase_id | FK | 原單據 |
-| reason | text | 原因 |
-| restock | bool | 是否回補庫存 |
-| total_amount | decimal | |
+| return_no | text UNIQUE | 自動產生 `RT{YYYYMMDD}-{NN}`，存檔前可修改 |
+| return_date | date **IDX** | 不可早於原單日期 |
+| return_type | enum | 銷貨退回／銷貨折讓／進貨退出（建立後不可改） |
+| sale_id / purchase_id | FK | 原單據（銷貨退回、折讓 → sale_id；進貨退出 → purchase_id） |
+| restock | bool | 銷貨退回是否回補熟豆庫存 |
+| total_amount | decimal | 退貨／折讓金額（不可超過原單可退金額） |
+| cost_amount | decimal `auto` | 回補／退出的庫存成本 |
+| reason / note | text | |
+| created_by、created_at、updated_at | | |
 
-明細表 `return_items`：return_id、product_id／bean_id、qty、unit_price、amount。
+`return_items`：return_id、line_no、sale_item_id（銷貨退回）／purchase_item_id（進貨退出）、qty、unit_price、amount、restock_kg（回補熟豆 kg）、cost_amount。銷貨折讓沒有明細。
 
-### 3.6 訂閱訂單 `subscriptions`
+### 3.6 訂閱訂單 `subscriptions`（Phase 4 已實作）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | subscription_id | PK | |
 | customer_id | FK → customers | |
-| product_id | FK → products | 或「當月推薦」 |
+| product_id | FK → products | 每期出貨的產品（原規格的「當月推薦」不另做，改產品即可） |
 | qty | int | 每期數量 |
+| grind_size | enum | 研磨度 |
+| unit_price | decimal | 每期單價（空白 = 依客戶價格等級帶零售／批發價） |
+| shipping_fee | decimal | 每期運費 |
 | frequency | enum | 每週／雙週／每月 |
-| next_ship_date | date | 下次出貨日 |
-| price | decimal | 每期金額 |
+| next_ship_date | date **IDX** | 下次出貨日 |
 | start_date / end_date | date | |
 | status | enum | 進行中／暫停／取消 |
+| channel / payment_method | enum | 產生銷貨單時帶入 |
+| note | text | |
 
-### 3.7 發票 `invoices`
+### 3.7 發票 `invoices`（Phase 4 已實作，手動登錄）
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | invoice_id | PK | |
-| invoice_no | text | 發票號碼 |
+| sale_id | FK → sales **IDX** | 一張銷貨單同時只能有一張未作廢的發票 |
+| invoice_no | text UNIQUE | 2 碼英文 ＋ 8 碼數字（自動轉大寫、去掉 -） |
 | invoice_date | date **IDX** | |
-| invoice_type | enum | 二聯／三聯／電子發票 |
-| buyer_tax_id | text | 買方統編 |
+| invoice_type | enum | 二聯／三聯／電子發票（三聯必填統編） |
+| buyer_tax_id / buyer_name | text | 買方統編（8 碼）／名稱 |
 | carrier | text | 載具 |
-| amount / tax | decimal | |
+| amount | decimal | 含稅金額（預設 = 銷貨單淨額） |
+| sales_amount / tax_amount | decimal `auto` | 未稅 = round(含稅 ÷ 1.05)、稅額 = 含稅 − 未稅 |
 | status | enum | 開立／作廢／折讓 |
+| void_date / void_reason | | 作廢資料 |
+| note、created_by、created_at、updated_at | | |
 
 ---
 
-## 4. 庫存與生產
+## 4. 庫存與生產## 4. 庫存與生產
 
 ### 4.1 生豆庫存（批號） `green_bean_lots`
 
@@ -436,16 +451,26 @@
 | prefix + ymd | PK。prefix：`P` 進貨單、`L` 生豆批號、`R` 烘焙批次、`S` 銷貨單；ymd：`YYYYMMDD` |
 | last_no | 當日已用到的最大流水號（只增不減，刪單後號碼不重複使用） |
 
-### 4.6 盤點 `stock_counts` / `stock_count_items`
+### 4.6 盤點／庫存調整 `stock_counts` / `stock_count_items`（Phase 4 已實作）
+
+`stock_counts`：count_id、count_no（`C{YYYYMMDD}-{NN}`）、count_date、count_type（盤點／調整）、item_type（生豆／熟豆／包材，一張單一種）、note、created_by。
+
+`stock_count_items`：
 
 | 欄位 | 說明 |
 |---|---|
-| count_id、count_date、note | 盤點單表頭 |
-| item_type、item_ref_id、system_qty、actual_qty、diff_qty `auto` | 明細：差異自動產生盤盈／盤虧異動 |
+| item_ref_id | 生豆批號 lot_id／熟豆批次 roasted_lot_id／包材 packaging_id |
+| system_qty | 帳面數量（盤點日當天結束的庫存） |
+| actual_qty | 盤點：實際數量 |
+| diff_qty `auto` | 盤點：實際 − 帳面；調整：−出庫數量 |
+| reason | 盤盈／盤虧（盤點自動）；試喝／樣品／報廢（調整） |
+| unit_cost / amount | 生豆、熟豆用批號成本；包材用移動平均成本 |
+
+> 差異 ≠ 0 時寫一筆 `inventory_movements`（movement_type = reason、ref_doc_type = 'stock_counts'）。
 
 ---
 
-## 5. 財務
+## 5. 財務## 5. 財務
 
 ### 5.1 銀行收支 `bank_transactions`（Phase 3 已實作）
 
@@ -599,10 +624,13 @@ erDiagram
 5. **收款狀態**（Phase 3 起）：一律由收款沖帳決定（未收／部分收款／已收清），不能手動指定，也不依付款方式自動判定；現金、LINE Pay、刷卡也要在銀行收支登錄入帳並沖帳。合計為 0 的單直接為已收清
 6. **單號** `S{YYYYMMDD}-{NN}`，留空自動產生，可手動輸入，不可重複
 7. **修改／刪除**：隨時可改（整張重寫明細與異動、FIFO 重算），已有收款沖帳也可以改；改後合計小於已收金額 → 標示「溢收」（狀態仍為已收清）。刪除時熟豆加回庫存；**有收款沖帳的單不可刪除**，需先刪除沖帳
-8. 包材耗用（依配方扣包材）在 Phase 4
+8. **包材耗用**（Phase 4）：產品有配方 → 每包用量 × 數量扣包材（包裝耗用），成本 = 包材移動平均成本（無庫存時用主檔參考單價），記在 `packaging_cost` 並加進成本；包材不足比照熟豆提醒後可存
+9. **有退貨／折讓的銷貨單**不可修改、不可刪除（請先刪除退貨單）；有未作廢發票的銷貨單不可刪除
 
 ### 8.4 收付款（Phase 3 已實作）
 - 收款、付款一律在「銀行收支」手動登錄入帳／出帳，再選要沖銷的單據：入帳 → 銷貨單；出帳 → 進貨單或費用
+- **退款**（Phase 4）：出帳也可沖銷貨單（退款給客戶）、入帳也可沖進貨單（供應商退款），金額不可超過應退金額；收支類別用「其他」
+- 已收（付）= 收付款沖帳 − 退款沖帳；應收（付）淨額 = 原單合計 − 退貨／折讓
 - 一筆收支可沖多張單、一張單可分多次沖；沖帳合計不可超過收支金額；單筆沖帳不可超過該單未沖餘額；可只沖一部分，之後再編輯補沖
 - 單據 `payment_status` 依已沖銷金額自動更新（收支新增、修改、刪除，以及單據修改時重算）
 - 進貨單有付款沖帳 → 鎖定（Phase 1 規則）；銷貨單、費用有沖帳仍可修改（溢收／溢付另外標示），但不可刪除
@@ -615,8 +643,26 @@ erDiagram
 - 包材現有量 < `safety_stock` → 補貨提醒
 - 熟豆距賞味期限 ≤ 7 天 → 出清提醒
 
-### 8.6 訂閱
-- 每日檢查 `next_ship_date`，自動產生銷貨單草稿，出貨後推算下次日期
+### 8.6 訂閱（Phase 4 已實作）
+- 不自動開單：「訂閱 → 待出貨」列出下次出貨日在指定日（含）之前、進行中、未過結束日的訂閱
+- 勾選後一次產生銷貨單（銷貨日 = 出貨日；扣熟豆與包材），同一個 D1 batch 把下次出貨日往後推一期（每週 +7、雙週 +14、每月 +1 個月，月底自動調整）
+- 庫存不足時列出不足項目，確認後強制產生
+- 已出貨過的訂閱不可刪除，改為「取消」
+
+### 8.7 退貨／折讓（Phase 4 已實作）
+- 退貨單掛在原單上；原單應收（付）淨額 = 合計 − 退貨／折讓，收付款狀態依淨額重算
+- 客戶已付清的部分變成「應退客戶」→ 銀行收支出帳沖銷原銷貨單；供應商已付清的部分 → 入帳沖銷原進貨單
+- 銷貨退回：選原明細與數量（≤ 已售 − 已退）；回補時熟豆依原出貨批次（從最後扣的批次往回）加回（異動：退貨 +kg），包材不回補；不回補則不動庫存
+- 銷貨折讓：只有金額
+- 進貨退出：選原明細（生豆批號／包材）與數量（≤ 目前庫存、≤ 已進 − 已退），以入庫成本扣庫存（異動：退貨 −數量）；進貨退出會讓進貨單鎖定（批號已被使用）
+- 金額預設 = 數量 × 原單價，可修改；退貨合計不可超過原單淨額
+- 退貨單可修改（類型與原單不可改）或刪除，庫存與原單狀態一併還原
+
+### 8.8 盤點／庫存調整（Phase 4 已實作）
+- 盤點：帳面數量 = 盤點日當天結束的庫存；只處理有填實際數量的品項
+- 調整：試喝／樣品／報廢直接扣庫存
+- 修改 = 整張重寫；刪除 = 異動一起刪除
+- 盤點／調整的異動跟其他使用一樣，會讓來源進貨單、烘焙批次鎖定
 
 ---
 
@@ -813,3 +859,42 @@ API：
 | `/api/finance/expense-summary` | GET（`?from=&to=`） | 費用分析：類別合計、佔比、逐月 |
 
 銷貨單、進貨單的 GET 另回傳 `payments`（沖帳紀錄）、`paid_amount`、`unpaid_amount`；銷貨單另有 `overpaid`。
+
+---
+
+## 15. Phase 4 實作決議
+
+| # | 項目 | 決議 |
+|---|---|---|
+| 1 | 配方 | **只放包材，銷貨時扣**。熟豆維持 Phase 2 的「產品指定熟豆品項 × 每包淨重」；不另做包裝作業與成品庫存 |
+| 2 | 發票 | **手動登錄發票資料**（號碼、類型、統編、載具），系統拆稅額、作廢、依營業稅期別彙總、列出未開發票的銷貨單；不串接電子發票平台 |
+| 3 | 訂閱出貨 | **清單一鍵產生**：待出貨清單勾選後產生銷貨單並推進下次出貨日；不做每日自動排程 |
+| 4 | 退貨金額 | **抵減原單應收，已收款再退款**：原單淨額 = 合計 − 退貨折讓；超收部分在銀行收支以出帳退款沖銷原銷貨單（進貨退出同理以入帳沖銷原進貨單） |
+| 5 | 盤點範圍 | 生豆批號、熟豆批次、包材都可盤點；另有「調整」處理試喝／樣品／報廢 |
+| 6 | 包材成本 | 移動平均成本（庫存金額 ÷ 庫存數量），沒有庫存時用包材主檔參考單價 |
+| 7 | 退款類別 | 退款的收支類別用「其他」（不新增類別，避免重建資料表） |
+
+**既有資料庫升級**：先跑 `db/migrations/005_phase4.sql`（`sale_items.packaging_cost`、`sales.subscription_id` 兩個欄位），再跑 `db/schema.sql` 建立 Phase 4 新表。
+
+### API 一覽（Phase 4 新增）
+
+| 路徑 | 方法 | 說明 |
+|---|---|---|
+| `/api/recipes` | GET | 各產品配方文字 |
+| `/api/recipes/{product_id}` | GET／PUT | 讀取／整份覆寫配方 `{ items: [{ packaging_id, qty }] }` |
+| `/api/returns` | GET（`?from=&to=&return_type=&customer_id=&supplier_id=&sale_id=&purchase_id=`）／POST | 退貨查詢、新增。POST：`{ return_type, return_date, sale_id｜purchase_id, restock?, items: [{ sale_item_id｜purchase_item_id, qty, unit_price? }], total_amount（折讓）, reason?, note? }` |
+| `/api/returns/{id}` | GET／PUT／DELETE | 讀取、修改、刪除 |
+| `/api/returns/source` | GET（`?sale_id=｜purchase_id=&exclude_return_id=`） | 原單明細、可退數量、原單淨額 |
+| `/api/invoices` | GET（`?from=&to=&invoice_type=&status=&q=`）／POST | 發票查詢（含期別彙總）、登錄 |
+| `/api/invoices/{id}` | GET／PUT／DELETE | 讀取、修改、刪除（登錄錯誤用） |
+| `/api/invoices/{id}/void` | POST `{ void_date, void_reason }` | 作廢 |
+| `/api/invoices/uninvoiced` | GET（`?from=&to=`） | 尚未開發票的銷貨單 |
+| `/api/subscriptions` | GET（`?status=&customer_id=`）／POST | 訂閱列表（含每月約當營收）、新增 |
+| `/api/subscriptions/{id}` | GET／PUT／DELETE | 讀取（含出貨紀錄）、修改、刪除（已出貨不可刪） |
+| `/api/subscriptions/due` | GET（`?date=`） | 待出貨清單 |
+| `/api/subscriptions/generate` | POST `{ date, ids, allow_shortage? }` | 產生銷貨單，回傳每筆結果（ok／shortage／error） |
+| `/api/stock-counts` | GET（`?from=&to=&count_type=&item_type=`）／POST | 盤點／調整查詢、新增。POST：`{ count_type, item_type, count_date, items: [{ item_ref_id, actual_qty }｜{ item_ref_id, qty, reason }] }` |
+| `/api/stock-counts/{id}` | GET／PUT／DELETE | |
+| `/api/stock-counts/sheet` | GET（`?item_type=&date=&exclude_count_id=`） | 盤點表（帳面數量、單位成本） |
+
+銷貨單 GET 另回傳 `returns`、`returned_amount`、`net_amount`、`invoices`、每筆明細的 `packs`；進貨單 GET 另回傳 `returns`、`net_amount`、`refundable`。銀行收支 `open-docs` 另列出可退款的單據（`kind = refund`）。

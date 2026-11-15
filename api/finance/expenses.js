@@ -6,7 +6,7 @@
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
-import { statusStatement, docPayments } from '../lib/payment.js';
+import { statusStatement, docPayments, paidExpr } from '../lib/payment.js';
 
 async function prepare(db, body, { excludeId = null, keepNo = null } = {}) {
   if (!isDate(body.expense_date)) throw new HttpError(400, '費用日期格式錯誤（YYYY-MM-DD）');
@@ -73,7 +73,7 @@ export async function handleExpenses(id, request, env, user) {
     if (q) { where.push('(e.vendor LIKE ? OR e.note LIKE ? OR e.invoice_no LIKE ? OR e.expense_no LIKE ?)'); binds.push(...Array(4).fill(`%${q}%`)); }
     const { results } = await db.prepare(
       `SELECT e.*, c.name AS category_name,
-              COALESCE((SELECT SUM(a.amount) FROM payment_allocations a WHERE a.doc_type = 'expenses' AND a.doc_id = e.expense_id), 0) AS paid_amount
+              ${paidExpr('expenses', 'e.expense_id')} AS paid_amount
        FROM expenses e JOIN expense_categories c ON c.category_id = e.category_id
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY e.expense_date DESC, e.expense_id DESC`,

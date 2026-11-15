@@ -3,6 +3,7 @@
 //   帳齡 = as_of − 單據日期（天），分 0–30／31–60／61–90／90 天以上；另標示已過應收／應付日
 
 import { HttpError, json, toInt, isDate, dateRange, round, todayTW } from '../lib/http.js';
+import { paidExpr, returnsExpr } from '../lib/payment.js';
 
 const BUCKETS = [['0-30', 30], ['31-60', 60], ['61-90', 90], ['90+', Infinity]];
 const days = (a, b) => Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 86400000);
@@ -31,21 +32,34 @@ function asOfParam(url) {
   if (!isDate(asOf)) throw new HttpError(400, '截止日格式錯誤（YYYY-MM-DD）');
   return asOf;
 }
-const paidAsOf = (type, pk) => `COALESCE((SELECT SUM(a.amount) FROM payment_allocations a JOIN bank_transactions t ON t.txn_id = a.txn_id
-                                 WHERE a.doc_type = '${type}' AND a.doc_id = ${pk} AND t.txn_date <= ?1), 0)`;
+// 截止日的已收付（收付款 − 退款）與退貨折讓（退貨日 ≤ 截止日）
+const paidAsOf = (type, pk) => paidExpr(type, pk, { asOf: '?1' });
+const retAsOf = (type, pk) => returnsExpr(type, pk).replace('WHERE r.', 'WHERE r.return_date <= ?1 AND r.');
 
 async function receivables(db, url) {
   const asOf = asOfParam(url);
   const cid = url.searchParams.get('customer_id');
   const { results } = await db.prepare(
-    `SELECT 'sales' AS doc_type, s.sale_id AS doc_id, s.sale_no AS doc_no, s.sale_date AS doc_date, s.due_date, s.total_amount AS total,
+    `SELECT 'sales' AS doc_type, s.sale_id AS doc_id, s.sale_no AS doc_no, s.sale_date AS doc_date, s.due_date,
+            s.total_amount - ${retAsOf('sales', 's.sale_id')} AS total,
             s.customer_id, COALESCE(c.name, '散客') AS party, s.channel, s.payment_method, ${paidAsOf('sales', 's.sale_id')} AS paid
      FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
-     WHERE s.sale_date <= ?1 AND s.total_amount - ${paidAsOf('sales', 's.sale_id')} > 0.005
+     WHERE s.sale_date <= ?1 AND s.total_amount - ${retAsOf('sales', 's.sale_id')} - ${paidAsOf('sales', 's.sale_id')} > 0.005
      ${cid === 'none' ? 'AND s.customer_id IS NULL' : cid ? 'AND s.customer_id = ?2' : ''}
      ORDER BY s.sale_date, s.sale_id`,
   ).bind(asOf, ...(cid && cid !== 'none' ? [toInt(cid, '客戶')] : [])).all();
   const r = aging(results, asOf, 'customer_id');
+  // 應退客戶：已收 > 淨額（退貨／溢收）
+  const { results: refunds } = await db.prepare(
+    `SELECT s.sale_id AS doc_id, s.sale_no AS doc_no, s.sale_date AS doc_date, COALESCE(c.name, '散客') AS party,
+            ${paidAsOf('sales', 's.sale_id')} - (s.total_amount - ${retAsOf('sales', 's.sale_id')}) AS amount
+     FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
+     WHERE s.sale_date <= ?1 AND ${paidAsOf('sales', 's.sale_id')} - (s.total_amount - ${retAsOf('sales', 's.sale_id')}) > 0.005
+     ORDER BY s.sale_date`,
+  ).bind(asOf).all();
+  for (const x of refunds) x.amount = round(x.amount);
+  r.refunds = refunds;
+  r.refund_total = round(refunds.reduce((s2, x) => s2 + x.amount, 0));
   // 客戶信用額度
   const { results: limits } = await db.prepare('SELECT customer_id, credit_limit FROM customers WHERE credit_limit > 0').all();
   const lim = new Map(limits.map((x) => [x.customer_id, x.credit_limit]));
@@ -60,10 +74,11 @@ async function payables(db, url) {
   const rows = [];
   if (type !== 'expenses') {
     const { results } = await db.prepare(
-      `SELECT 'purchases' AS doc_type, p.purchase_id AS doc_id, p.purchase_no AS doc_no, p.purchase_date AS doc_date, p.due_date, p.total_amount AS total,
+      `SELECT 'purchases' AS doc_type, p.purchase_id AS doc_id, p.purchase_no AS doc_no, p.purchase_date AS doc_date, p.due_date,
+              p.total_amount - ${retAsOf('purchases', 'p.purchase_id')} AS total,
               'S' || p.supplier_id AS party_key, s.name AS party, p.invoice_no, '進貨' AS kind, ${paidAsOf('purchases', 'p.purchase_id')} AS paid
        FROM purchases p JOIN suppliers s ON s.supplier_id = p.supplier_id
-       WHERE p.purchase_date <= ?1 AND p.total_amount - ${paidAsOf('purchases', 'p.purchase_id')} > 0.005
+       WHERE p.purchase_date <= ?1 AND p.total_amount - ${retAsOf('purchases', 'p.purchase_id')} - ${paidAsOf('purchases', 'p.purchase_id')} > 0.005
        ${sid ? 'AND p.supplier_id = ?2' : ''}
        ORDER BY p.purchase_date, p.purchase_id`,
     ).bind(asOf, ...(sid ? [toInt(sid, '供應商')] : [])).all();

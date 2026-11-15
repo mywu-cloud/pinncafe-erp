@@ -1,4 +1,4 @@
-// 咖啡烘豆進銷存 — 後台管理（Phase 1～3）
+// 咖啡烘豆進銷存 — 後台管理（Phase 1～4）
 // 純 JavaScript，無建置步驟。顏色慣例：紅 = 增加／入庫，綠 = 減少／出庫。
 'use strict';
 
@@ -312,7 +312,7 @@ async function purchaseForm(id, reload) {
 
     const box = openModal(`
       <h2>${id ? '進貨單 ' + esc(p.purchase_no) : '新增進貨單'}</h2>
-      ${locked ? `<div class="notice">此進貨單已鎖定（${p.locked ? '生豆批號已被使用' : '已有付款紀錄，要修改請先到銀行收支刪除付款沖帳'}），只能檢視，無法修改或刪除。</div>` : ''}
+      ${locked ? `<div class="notice">此進貨單已鎖定（${p.locked ? '生豆批號已被使用（烘焙、盤點、退出…）' : '已有付款紀錄，要修改請先到銀行收支刪除付款沖帳'}），只能檢視，無法修改或刪除；退貨請按「進貨退出」。</div>` : ''}
       <form id="f">
         <div class="form-grid">
           <label>進貨日期 *<input name="purchase_date" type="date" required value="${esc(p.purchase_date)}" ${dis}></label>
@@ -334,15 +334,22 @@ async function purchaseForm(id, reload) {
           <div><span>稅額</span><input name="tax_amount" type="number" step="any" min="0" value="${esc(p.tax_amount)}" style="width:110px;text-align:right" ${dis}></div>
           <div class="grand"><span>合計</span><span id="tTotal"></span></div>
         </div>
+        ${id && p.returned_amount ? `<div class="totals"><div><span>進貨退出</span><span class="down">−${money(p.returned_amount)}</span></div><div><span>應付淨額</span><span>${money(p.net_amount)}</span></div></div>` : ''}
+        ${id ? returnsBlock(p) : ''}
         ${id ? paymentsBlock(p, '付款') : ''}
         <div class="form-actions">
           ${id && !locked ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
-          ${id && p.payment_status !== '已付清' ? '<button type="button" id="docPay">登錄付款</button>' : ''}
+          ${id ? '<button type="button" id="docReturn">進貨退出</button>' : ''}
+          ${id && p.refundable > 0 ? '<button type="button" id="docRefund">登錄供應商退款</button>' : ''}
+          ${id && p.unpaid_amount > 0 ? '<button type="button" id="docPay">登錄付款</button>' : ''}
           <button type="button" id="cancel">${locked ? '關閉' : '取消'}</button>${locked ? '' : '<button class="primary">存檔</button>'}
         </div>
       </form>`, true);
 
     const f = $('#f', box);
+    if ($('#docReturn', box)) $('#docReturn', box).onclick = () => returnForm('進貨退出', { purchase_id: id }, null, reload);
+    if ($('#docRefund', box)) $('#docRefund', box).onclick = () => txnForm(DIR_IN, null, reload, { category: '其他', counterparty: p.supplier_name, amount: p.refundable, description: `${p.purchase_no} 供應商退款`, allocations: [{ doc_type: 'purchases', doc_id: id, amount: p.refundable }] });
+    bindReturnRows(box, reload);
     if ($('#docPay', box)) $('#docPay', box).onclick = () => txnForm(DIR_OUT, null, reload, { category: '進貨付款', supplier_id: p.supplier_id, amount: p.unpaid_amount, description: p.purchase_no, allocations: [{ doc_type: 'purchases', doc_id: id, amount: p.unpaid_amount }] });
     const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
 
@@ -666,7 +673,7 @@ const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
 const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
 const PAY_STATUS = ['未收', '部分收款', '已收清'];
 const plainOpts = (values, sel, blank = null) => (blank === null ? '' : `<option value="">${blank}</option>`) + values.map((v) => `<option ${v === sel ? 'selected' : ''}>${v}</option>`).join('');
-const payTag = (s, over = 0) => `<span class="tag ${s === '已收清' && !over ? '' : 'warn'}">${esc(over ? '溢收 ' + money(over) : s)}</span>`;
+const payTag = (s, over = 0) => `<span class="tag ${s === '已收清' && !over ? '' : 'warn'}">${esc(over ? '應退 ' + money(over) : s)}</span>`;
 
 async function pageSales() {
   const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
@@ -716,12 +723,13 @@ async function saleForm(id, reload) {
       <td><input data-k="qty" type="number" step="1" min="1" value="${esc(it.qty)}" class="num"></td>
       <td><input data-k="unit_price" type="number" step="any" min="0" value="${esc(it.unit_price)}" class="num"></td>
       <td class="num" data-amount></td><td class="num down" data-kg></td>
-      <td data-lots>${(it.lots || []).map((l) => `${esc(l.batch_no)} ${kg(l.kg)}kg`).join('、')}${it.undeducted_kg ? ` <span class="tag warn">未扣 ${kg(it.undeducted_kg)}kg</span>` : ''}</td>
+      <td data-lots>${(it.lots || []).map((l) => `${esc(l.batch_no)} ${kg(l.kg)}kg`).join('、')}${it.undeducted_kg ? ` <span class="tag warn">未扣 ${kg(it.undeducted_kg)}kg</span>` : ''}${it.packs?.length ? `<div class="hint">包材：${it.packs.map((k) => `${esc(k.name)}×${fmt(k.qty)}`).join('、')}</div>` : ''}</td>
       <td><button type="button" class="link" data-del>刪除</button></td></tr>`;
 
     const box = openModal(`
       <h2>${id ? '銷貨單 ' + esc(s.sale_no) : '新增銷貨單'}</h2>
-      ${s.overpaid ? `<div class="notice">已收 ${money(s.paid_amount)}，比合計多 ${money(s.overpaid)}（溢收），請確認金額或到銀行收支調整沖帳。</div>` : ''}
+      ${s.overpaid ? `<div class="notice">已收 ${money(s.paid_amount)}，比應收淨額 ${money(s.net_amount)} 多 ${money(s.overpaid)}（應退客戶），請按「登錄退款」或確認金額。</div>` : ''}
+      ${s.returns?.length ? '<div class="notice">這張銷貨單已有退貨／折讓，明細不能再修改（要改請先刪除退貨單）。</div>' : ''}
       <form id="f">
         <div class="form-grid">
           <label>銷貨日期 *<input name="sale_date" type="date" required value="${esc(s.sale_date)}"></label>
@@ -745,17 +753,35 @@ async function saleForm(id, reload) {
           <div><span>運費</span><input name="shipping_fee" type="number" step="any" min="0" value="${esc(s.shipping_fee)}" style="width:110px;text-align:right"></div>
           <div class="grand"><span>合計</span><span id="tTotal" class="up"></span></div>
           ${id ? `<div><span>熟豆成本</span><span>${money(s.cost_amount)}</span></div><div><span>毛利（不含運費）</span><span>${money(s.gross_profit)}</span></div>
+                  ${s.returned_amount ? `<div><span>退貨／折讓</span><span class="down">−${money(s.returned_amount)}</span></div><div><span>應收淨額</span><span>${money(s.net_amount)}</span></div>` : ''}
                   <div><span>已收</span><span>${money(s.paid_amount)}</span></div><div><span>未收</span><span>${money(s.unpaid_amount)}</span></div>` : ''}
         </div>
+        ${id ? returnsBlock(s) : ''}
+        ${id ? `<div class="section-title">發票</div>${(s.invoices || []).length ? `<div class="table-wrap"><table><thead><tr><th>發票號碼</th><th>日期</th><th>類型</th><th>統編</th><th class="num">含稅</th><th>狀態</th></tr></thead><tbody>
+          ${s.invoices.map((i) => `<tr class="clickable" data-inv="${i.invoice_id}"><td>${esc(i.invoice_no)}</td><td>${esc(i.invoice_date)}</td><td>${esc(i.invoice_type)}</td><td>${esc(i.buyer_tax_id)}</td><td class="num">${money(i.amount)}</td><td>${invTag(i.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="hint">尚未登錄發票。</p>'}` : ''}
         ${id ? paymentsBlock(s, '收款') : '<p class="hint">收款狀態由收款沖帳決定：存檔後到「銀行收支」登錄入帳（現金、LINE Pay、刷卡也一樣）並沖銷這張單，或存檔後重新開啟這張單按「登錄收款」。</p>'}
         <div class="form-actions">
           ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          ${id ? '<button type="button" id="docReturn">退貨／折讓</button>' : ''}
+          ${id && !(s.invoices || []).some((i) => i.status !== '作廢') ? '<button type="button" id="docInvoice">登錄發票</button>' : ''}
+          ${id && s.overpaid > 0 ? '<button type="button" id="docRefund">登錄退款</button>' : ''}
           ${id && s.unpaid_amount > 0 ? '<button type="button" id="docRecv">登錄收款</button>' : ''}
           <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
         </div>
       </form>`, true);
 
     const f = $('#f', box);
+    if ($('#docReturn', box)) $('#docReturn', box).onclick = () => {
+      const pickBox = openModal(`<h2>${esc(s.sale_no)} 退貨／折讓</h2><p class="hint">銷貨退回：退回部分或全部品項（可選擇熟豆是否回補）；銷貨折讓：只調降金額，不動庫存。</p>
+        <div class="form-actions"><button type="button" id="rt1" class="primary">銷貨退回</button><button type="button" id="rt2" class="primary">銷貨折讓</button><span class="spacer"></span><button type="button" id="cancel">取消</button></div>`);
+      $('#rt1', pickBox).onclick = () => returnForm('銷貨退回', { sale_id: id }, null, reload);
+      $('#rt2', pickBox).onclick = () => returnForm('銷貨折讓', { sale_id: id }, null, reload);
+      $('#cancel', pickBox).onclick = closeModal;
+    };
+    if ($('#docInvoice', box)) $('#docInvoice', box).onclick = () => invoiceForm(id, null, reload);
+    if ($('#docRefund', box)) $('#docRefund', box).onclick = () => txnForm(DIR_OUT, null, reload, { category: '其他', counterparty: s.customer_name, amount: s.overpaid, description: `${s.sale_no} 退款`, allocations: [{ doc_type: 'sales', doc_id: id, amount: s.overpaid }] });
+    $$('[data-inv]', box).forEach((tr) => tr.onclick = () => invoiceForm(id, Number(tr.dataset.inv), reload));
+    bindReturnRows(box, reload);
     if ($('#docRecv', box)) $('#docRecv', box).onclick = () => txnForm(DIR_IN, null, reload, { category: '銷貨收款', customer_id: s.customer_id, amount: s.unpaid_amount, description: s.sale_no, allocations: [{ doc_type: 'sales', doc_id: id, amount: s.unpaid_amount }] });
     const custOf = () => customers.find((c) => c.customer_id === Number(f.customer_id.value));
     const readItems = () => $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
@@ -823,9 +849,8 @@ async function saleForm(id, reload) {
         let res;
         try { res = await save(); } catch (err) {
           if (err.detail?.code !== 'SHORTAGE') throw err;
-          const lines = err.detail.shortages.map((x) => `・${x.product_name}：需要 ${kg(x.need_kg)} kg，不足 ${kg(x.short_kg)} kg`
-            + (x.batch_no ? `（會記在批次 ${x.batch_no}，該批庫存變負數）` : '（還沒有任何烘焙批次，這筆不會扣庫存）'));
-          if (!confirm(`熟豆庫存不足（只計算烘焙日在銷貨日當天或之前的批次）：\n\n${lines.join('\n')}\n\n補登烘焙批次後，重新存檔這張銷貨單就會重新配批次。\n仍要存檔嗎？`)) return;
+          const lines = shortageLines(err.detail.shortages);
+          if (!confirm(`庫存不足（熟豆只計算烘焙日在銷貨日當天或之前的批次）：\n\n${lines.join('\n')}\n\n補登烘焙批次或進貨後，重新存檔這張銷貨單就會重新扣庫存。\n仍要存檔嗎？`)) return;
           res = await save({ allow_shortage: true });
         }
         closeModal();
@@ -1420,6 +1445,540 @@ async function pageExpenseSummary() {
   load();
 }
 
+// ---------------------------------------------------------------- Phase 4 共用
+const RET_TYPES = ['銷貨退回', '銷貨折讓', '進貨退出'];
+const daysAgo = (n) => new Date(Date.now() + 8 * 3600e3 - n * 86400e3).toISOString().slice(0, 10);
+const shortageLines = (list) => list.map((x) => (x.type === '包材'
+  ? `・${x.product_name}：包材「${x.packaging_name}」需要 ${fmt(x.need_qty)} ${x.unit || ''}，不足 ${fmt(x.short_qty)}（包材庫存會變負數）`
+  : `・${x.product_name}：熟豆需要 ${kg(x.need_kg)} kg，不足 ${kg(x.short_kg)} kg` + (x.batch_no ? `（會記在批次 ${x.batch_no}，該批庫存變負數）` : '（還沒有任何烘焙批次，這筆不會扣庫存）')));
+/** 原單上的退貨／折讓清單 */
+const returnsBlock = (d) => (d.returns?.length
+  ? `<div class="section-title">退貨／折讓</div><div class="table-wrap"><table><thead><tr><th>日期</th><th>單號</th><th>類型</th><th>原因</th><th class="num">金額</th></tr></thead><tbody>
+      ${d.returns.map((r) => `<tr class="clickable" data-return="${r.return_id}"><td>${esc(r.return_date)}</td><td>${esc(r.return_no)}</td><td>${esc(r.return_type)}${r.return_type === '銷貨退回' && !r.restock ? '（不回補）' : ''}</td><td>${esc(r.reason)}</td><td class="num down">−${money(r.total_amount)}</td></tr>`).join('')}
+      </tbody></table></div>` : '');
+const bindReturnRows = (box, reload) => $$('[data-return]', box).forEach((tr) => tr.onclick = () => returnForm(null, null, Number(tr.dataset.return), reload));
+
+// ---------------------------------------------------------------- 退貨／折讓
+async function pageReturns() {
+  $('#main').innerHTML = `
+    <h2>退貨／折讓</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>類型<select id="type">${plainOpts(RET_TYPES, null, '全部')}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="add" class="primary">＋ 新增退貨／折讓</button>
+    </div>
+    <p class="hint">退貨單掛在原銷貨單／進貨單上，原單應收（付）會扣掉退貨金額。客戶已付清的部分會變成「應退客戶」，請到銀行收支登錄出帳退款並沖銷原銷貨單；供應商已付清的部分則登錄入帳沖銷原進貨單。也可以直接在銷貨單、進貨單上按「退貨／折讓」。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/returns' + qs({ from: $('#from').value, to: $('#to').value, return_type: $('#type').value }));
+      $('#stats').innerHTML = statCards([['筆數', fmt(summary.count)], ['銷貨退回', money(summary.sales_return), 'down'], ['銷貨折讓', money(summary.allowance), 'down'], ['進貨退出', money(summary.purchase_return)]]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>單號</th><th>類型</th><th>原單</th><th>客戶／供應商</th><th>品項</th><th>原因</th><th class="num">金額</th><th>庫存</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.return_id}"><td>${esc(r.return_date)}</td><td>${esc(r.return_no)}</td><td>${esc(r.return_type)}</td><td>${esc(r.sale_no || r.purchase_no)}</td>
+          <td>${esc(r.customer_name || r.supplier_name)}</td><td>${esc(r.items_text)}</td><td>${esc(r.reason)}</td><td class="num">${money(r.total_amount)}</td>
+          <td>${r.return_type === '銷貨退回' ? (r.restock ? '<span class="up">回補</span>' : '不回補') : r.return_type === '進貨退出' ? '<span class="down">扣庫存</span>' : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有退貨／折讓</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => returnForm(null, null, Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#add').onclick = () => returnPicker(load);
+  load();
+}
+
+/** 新增退貨時先選類型與原單 */
+async function returnPicker(reload) {
+  try {
+    const [sales, purchases] = await Promise.all([api('/sales' + qs({ from: daysAgo(365) })), api('/purchases' + qs({ from: daysAgo(365) }))]);
+    const saleOpts = sales.data.map((s) => `<option value="${s.sale_id}">${esc(s.sale_no)}｜${esc(s.sale_date)}｜${esc(s.customer_name || '散客')}｜${money(s.total_amount)}</option>`).join('');
+    const purOpts = purchases.data.map((p) => `<option value="${p.purchase_id}">${esc(p.purchase_no)}｜${esc(p.purchase_date)}｜${esc(p.supplier_name)}｜${money(p.total_amount)}</option>`).join('');
+    const box = openModal(`
+      <h2>新增退貨／折讓</h2>
+      <form id="f"><div class="form-grid">
+        <label>類型<select name="type">${plainOpts(RET_TYPES, '銷貨退回')}</select></label>
+        <label class="full" id="docLabel">原銷貨單（近一年）<select name="doc" required><option value="">請選擇</option>${saleOpts}</select></label>
+      </div>
+      <div class="form-actions"><span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">下一步</button></div></form>`);
+    const f = $('#f', box);
+    f.type.onchange = () => {
+      const isP = f.type.value === '進貨退出';
+      $('#docLabel', box).firstChild.textContent = isP ? '原進貨單（近一年）' : '原銷貨單（近一年）';
+      f.doc.innerHTML = '<option value="">請選擇</option>' + (isP ? purOpts : saleOpts);
+    };
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const isP = f.type.value === '進貨退出';
+      returnForm(f.type.value, isP ? { purchase_id: Number(f.doc.value) } : { sale_id: Number(f.doc.value) }, null, reload);
+    };
+  } catch (e) { fail(e); }
+}
+
+async function returnForm(type, src, id, reload) {
+  try {
+    const r = id ? (await api(`/returns/${id}`)).data : { return_type: type, return_date: today(), restock: 1, ...src, items: [] };
+    type = r.return_type;
+    const isP = type === '進貨退出';
+    const isAllow = type === '銷貨折讓';
+    const srcRes = await api('/returns/source' + qs(isP ? { purchase_id: r.purchase_id, exclude_return_id: id } : { sale_id: r.sale_id, exclude_return_id: id }));
+    const lines = srcRes.data;
+    const bal = srcRes.balance;
+    const mine = new Map((r.items || []).map((it) => [isP ? it.purchase_item_id : it.sale_item_id, it]));
+    const room = r2(bal.net + (id ? r.total_amount : 0));
+    const lineRows = lines.map((l) => {
+      const key = isP ? l.purchase_item_id : l.sale_item_id;
+      const m = mine.get(key);
+      return `<tr data-key="${key}"><td>${esc(l.name)}${l.lot_no ? `（${esc(l.lot_no)}）` : ''}${l.grind_size ? `／${esc(l.grind_size)}` : ''}</td>
+        <td class="num">${fmt(l.qty, isP ? 2 : 0)}</td><td class="num">${l.returned ? fmt(l.returned, isP ? 2 : 0) : ''}</td>${isP ? `<td class="num">${fmt(l.stock, 2)}</td>` : ''}
+        <td class="num">${fmt(l.returnable, isP ? 2 : 0)}</td>
+        <td><input data-qty type="number" step="${isP ? 'any' : '1'}" min="0" max="${l.returnable}" value="${esc(m?.qty)}" class="num"></td>
+        <td><input data-price type="number" step="any" min="0" value="${esc(m ? m.unit_price : l.unit_price)}" class="num"></td>
+        <td class="num" data-amt></td></tr>`;
+    }).join('');
+    const box = openModal(`
+      <h2>${id ? `${esc(type)} ${esc(r.return_no)}` : `新增${esc(type)}`}</h2>
+      <p class="hint">原單：${esc(isP ? (r.purchase_no || bal.no) : (r.sale_no || bal.no))}${r.customer_name ? `｜${esc(r.customer_name)}` : ''}${r.supplier_name ? `｜${esc(r.supplier_name)}` : ''}　
+        原單合計 ${money(bal.total)}、其他退貨 ${money(bal.returned - (id ? r.total_amount : 0))}、已${isP ? '付' : '收'} ${money(bal.paid)}；本單最多 ${money(room)}</p>
+      <form id="f">
+        <div class="form-grid">
+          <label>日期 *<input name="return_date" type="date" required value="${esc(r.return_date)}"></label>
+          <label>單號<input name="return_no" value="${esc(r.return_no)}" placeholder="自動產生"></label>
+          ${type === '銷貨退回' ? `<label>熟豆回補庫存<select name="restock"><option value="1" ${r.restock ? 'selected' : ''}>回補（依原出貨批次加回）</option><option value="0" ${r.restock ? '' : 'selected'}>不回補（已開封／報廢）</option></select></label>` : ''}
+          ${isAllow ? `<label>折讓金額 *<input name="total_amount" type="number" step="any" min="0" required value="${esc(r.total_amount)}"></label>` : ''}
+          <label class="full">原因<input name="reason" value="${esc(r.reason)}" placeholder="例：包裝破損、口味不符、延遲到貨"></label>
+          <label class="full">備註<input name="note" value="${esc(r.note)}"></label>
+        </div>
+        ${isAllow ? '<p class="hint">折讓只調整金額，不動庫存。</p>' : `
+        <div class="section-title">${isP ? '退出' : '退回'}品項</div>
+        <div class="table-wrap"><table class="items"><thead><tr><th>品項</th><th class="num">原數量</th><th class="num">已退</th>${isP ? '<th class="num">目前庫存</th>' : ''}<th class="num">可退</th><th style="width:100px">本次${isP ? '退出' : '退回'}</th><th style="width:110px">單價</th><th class="num">金額</th></tr></thead>
+          <tbody id="lines">${lineRows}</tbody></table></div>
+        <p class="hint">${isP ? '退出的生豆／包材會以入庫成本扣庫存（異動類型：退貨）。單價預設為原進貨單價（不含運費攤提），可修改成供應商實際退款單價。' : '單價預設為原售價，可修改（例如原單有整單折扣）。包材不回補。'}</p>
+        <div class="totals"><div class="grand"><span>退貨金額</span><span id="tAmt"></span></div></div>`}
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`, true);
+    const f = $('#f', box);
+    const calc = () => {
+      let sum = 0;
+      $$('#lines tr', box).forEach((tr) => {
+        const a = r2((Number($('[data-qty]', tr).value) || 0) * (Number($('[data-price]', tr).value) || 0));
+        sum += a;
+        $('[data-amt]', tr).textContent = a ? money(a) : '';
+      });
+      if ($('#tAmt', box)) $('#tAmt', box).innerHTML = sum > room + 0.005 ? `<span class="down">${money(sum)}（超過 ${money(room)}）</span>` : money(sum);
+    };
+    if (!isAllow) { $('#lines', box).addEventListener('input', calc); calc(); }
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { ...Object.fromEntries(new FormData(f)), return_type: type, sale_id: r.sale_id, purchase_id: r.purchase_id };
+      if (body.restock !== undefined) body.restock = body.restock === '1';
+      if (!isAllow) {
+        body.items = $$('#lines tr', box).filter((tr) => Number($('[data-qty]', tr).value) > 0)
+          .map((tr) => ({ [isP ? 'purchase_item_id' : 'sale_item_id']: Number(tr.dataset.key), qty: $('[data-qty]', tr).value, unit_price: $('[data-price]', tr).value }));
+      }
+      try {
+        const res = await api(id ? `/returns/${id}` : '/returns', { method: id ? 'PUT' : 'POST', body });
+        closeModal();
+        toast(`已存檔 ${res.data.return_no}（${money(res.data.total_amount)}）`);
+        reload?.();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除 ${r.return_no}？${type === '銷貨退回' && r.restock ? '\n回補的熟豆會再扣回。' : ''}${isP ? '\n退出的庫存會加回。' : ''}\n原單應收（付）會恢復，無法復原。`)) return;
+      try { await api(`/returns/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 發票
+const INV_TYPES = ['二聯', '三聯', '電子發票'];
+const invTag = (s) => `<span class="tag ${s === '開立' ? '' : 'warn'}">${esc(s)}</span>`;
+
+async function pageInvoices() {
+  $('#main').innerHTML = `
+    <h2>發票</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>類型<select id="type">${plainOpts(INV_TYPES, null, '全部')}</select></label>
+      <label>狀態<select id="status">${plainOpts(['開立', '作廢', '折讓'], null, '全部')}</select></label>
+      <label>搜尋<input id="q" placeholder="發票號碼、統編、單號"></label>
+      <button id="search">查詢</button>
+    </div>
+    <p class="hint">這裡只登錄發票資料（實際開立仍在你原本的發票平台）。金額為含稅，系統依 5% 拆出未稅與稅額，並依營業稅期別（每兩個月）彙總，作廢的發票不計入。</p>
+    <div class="stats" id="stats"></div>
+    <div class="section-title">期別彙總</div>
+    <div class="card"><div class="table-wrap" id="periods"></div></div>
+    <div class="section-title">發票明細</div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>
+    <div class="section-title">尚未開發票的銷貨單（同一區間）</div>
+    <div class="card"><div class="table-wrap" id="todo"></div></div>`;
+  const load = async () => {
+    try {
+      const range = { from: $('#from').value, to: $('#to').value };
+      const [{ data, summary, periods }, todo] = await Promise.all([
+        api('/invoices' + qs({ ...range, invoice_type: $('#type').value, status: $('#status').value, q: $('#q').value.trim() })),
+        api('/invoices/uninvoiced' + qs(range)),
+      ]);
+      $('#stats').innerHTML = statCards([['有效張數', fmt(summary.count)], ['含稅金額', money(summary.amount)], ['未稅銷售額', money(summary.sales_amount)], ['稅額', money(summary.tax_amount)], ['作廢張數', fmt(summary.void_count)], ['未開發票', `${todo.data.length} 張／${money(todo.total)}`]]);
+      $('#periods').innerHTML = periods.length ? `<table><thead><tr><th>期別</th><th class="num">張數</th><th class="num">含稅金額</th><th class="num">未稅銷售額</th><th class="num">稅額</th></tr></thead><tbody>
+        ${periods.map((p) => `<tr><td>${esc(p.period)}</td><td class="num">${p.count}</td><td class="num">${money(p.amount)}</td><td class="num">${money(p.sales_amount)}</td><td class="num">${money(p.tax_amount)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">沒有資料</div>';
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>發票號碼</th><th>類型</th><th>銷貨單</th><th>客戶</th><th>買方統編</th><th>載具</th><th class="num">含稅</th><th class="num">未稅</th><th class="num">稅額</th><th>狀態</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.invoice_id}" data-sale="${r.sale_id}"><td>${esc(r.invoice_date)}</td><td>${esc(r.invoice_no)}</td><td>${esc(r.invoice_type)}</td><td>${esc(r.sale_no)}</td><td>${esc(r.buyer_name || r.customer_name)}</td>
+          <td>${esc(r.buyer_tax_id)}</td><td>${esc(r.carrier)}</td><td class="num">${money(r.amount)}</td><td class="num">${money(r.sales_amount)}</td><td class="num">${money(r.tax_amount)}</td><td>${invTag(r.status)}${r.void_reason ? `（${esc(r.void_reason)}）` : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有發票</div>';
+      $('#todo').innerHTML = todo.data.length ? `<table><thead><tr><th>銷貨日</th><th>單號</th><th>客戶</th><th>統編</th><th>通路</th><th class="num">合計</th><th></th></tr></thead><tbody>
+        ${todo.data.map((s) => `<tr><td>${esc(s.sale_date)}</td><td>${esc(s.sale_no)}</td><td>${esc(s.customer_name)}</td><td>${esc(s.tax_id)}</td><td>${esc(s.channel)}</td><td class="num">${money(s.total_amount)}</td>
+          <td><button type="button" class="link" data-new="${s.sale_id}">登錄發票</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">都開好了</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => invoiceForm(Number(tr.dataset.sale), Number(tr.dataset.id), load));
+      $$('#todo [data-new]').forEach((b) => b.onclick = () => invoiceForm(Number(b.dataset.new), null, load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#q').onkeydown = (e) => e.key === 'Enter' && load();
+  load();
+}
+
+async function invoiceForm(saleId, id, reload) {
+  try {
+    const sale = (await api(`/sales/${saleId}`)).data;
+    const cust = sale.customer_id ? (await api(`/customers/${sale.customer_id}`)).data : null;
+    const inv = id ? (await api(`/invoices/${id}`)).data
+      : { invoice_date: today(), invoice_type: cust?.tax_id ? '三聯' : '電子發票', buyer_tax_id: cust?.tax_id || '', buyer_name: cust?.tax_id ? cust.name : '', amount: sale.net_amount };
+    const voided = inv.status === '作廢';
+    const dis = voided ? 'disabled' : '';
+    const box = openModal(`
+      <h2>${id ? `發票 ${esc(inv.invoice_no)}` : '登錄發票'}</h2>
+      <p class="hint">銷貨單 ${esc(sale.sale_no)}｜${esc(sale.sale_date)}｜${esc(sale.customer_name || '散客')}｜合計 ${money(sale.total_amount)}${sale.returned_amount ? `（扣退貨折讓後 ${money(sale.net_amount)}）` : ''}</p>
+      ${voided ? `<div class="notice">此發票已於 ${esc(inv.void_date)} 作廢${inv.void_reason ? `：${esc(inv.void_reason)}` : ''}。</div>` : ''}
+      <form id="f">
+        <div class="form-grid">
+          <label>發票號碼 *<input name="invoice_no" required value="${esc(inv.invoice_no)}" placeholder="AB12345678" ${dis}></label>
+          <label>發票日期 *<input name="invoice_date" type="date" required value="${esc(inv.invoice_date)}" ${dis}></label>
+          <label>類型<select name="invoice_type" ${dis}>${plainOpts(INV_TYPES, inv.invoice_type)}</select></label>
+          <label>含稅金額<input name="amount" type="number" step="any" min="0" value="${esc(inv.amount)}" ${dis}></label>
+          <label>買方統編<input name="buyer_tax_id" value="${esc(inv.buyer_tax_id)}" maxlength="8" ${dis}></label>
+          <label>買方名稱<input name="buyer_name" value="${esc(inv.buyer_name)}" ${dis}></label>
+          <label>載具<input name="carrier" value="${esc(inv.carrier)}" placeholder="手機條碼 /ABC1234" ${dis}></label>
+          <label>未稅／稅額<input id="split" disabled></label>
+          <label class="full">備註<input name="note" value="${esc(inv.note)}" ${dis}></label>
+        </div>
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}${id && !voided ? '<button type="button" id="void">作廢</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">${voided ? '關閉' : '取消'}</button>${voided ? '' : '<button class="primary">存檔</button>'}
+        </div>
+      </form>`);
+    const f = $('#f', box);
+    const split = () => { const a = Number(f.amount.value) || 0; const s = Math.round(a / 1.05); $('#split', box).value = `${money(s)}／${money(a - s)}`; };
+    f.amount.oninput = split; split();
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const res = await api(id ? `/invoices/${id}` : '/invoices', { method: id ? 'PUT' : 'POST', body: { ...Object.fromEntries(new FormData(f)), sale_id: saleId } });
+        closeModal(); toast(`已存檔發票 ${res.data.invoice_no}`); reload?.();
+      } catch (err) { fail(err); }
+    };
+    if ($('#void', box)) $('#void', box).onclick = async () => {
+      const reason = prompt(`作廢發票 ${inv.invoice_no}，請輸入作廢原因：`, '');
+      if (reason === null) return;
+      try { await api(`/invoices/${id}/void`, { method: 'POST', body: { void_date: today(), void_reason: reason } }); closeModal(); toast('已作廢'); reload?.(); } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除發票 ${inv.invoice_no} 的登錄資料？\n（登錄錯誤才刪除；實際作廢請按「作廢」。）`)) return;
+      try { await api(`/invoices/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 訂閱
+const FREQS = ['每週', '雙週', '每月'];
+const SUB_STATUS = ['進行中', '暫停', '取消'];
+
+async function pageSubscriptions() {
+  $('#main').innerHTML = `
+    <h2>訂閱</h2>
+    <div class="section-title">待出貨</div>
+    <div class="toolbar">
+      <label>出貨日<input type="date" id="shipDate" value="${today()}"></label>
+      <button id="loadDue">重新整理</button><span class="spacer"></span>
+      <button id="gen" class="primary">產生勾選的銷貨單</button>
+    </div>
+    <p class="hint">列出「下次出貨日」在出貨日當天或之前、進行中的訂閱。勾選後一次產生銷貨單（銷貨日 = 出貨日，會扣熟豆與包材），並把下次出貨日往後推一期。沒按就不會出貨。</p>
+    <div class="card"><div class="table-wrap" id="due"></div></div>
+    <div class="section-title">全部訂閱</div>
+    <div class="toolbar">
+      <label>狀態<select id="status">${plainOpts(SUB_STATUS, null, '全部')}</select></label>
+      <span class="spacer"></span><button id="add" class="primary">＋ 新增訂閱</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const loadDue = async () => {
+    try {
+      const { data, total } = await api('/subscriptions/due' + qs({ date: $('#shipDate').value }));
+      $('#due').innerHTML = data.length ? `<table><thead><tr><th style="width:36px"><input type="checkbox" id="all" checked></th><th>應出貨日</th><th>客戶</th><th>產品</th><th>研磨</th><th class="num">數量</th><th class="num">金額</th><th>頻率</th><th>出貨後下次</th></tr></thead><tbody>
+        ${data.map((s) => `<tr><td><input type="checkbox" data-sub="${s.subscription_id}" checked></td><td>${esc(s.next_ship_date)}${s.next_ship_date < $('#shipDate').value ? ' <span class="tag warn">已過期</span>' : ''}</td><td>${esc(s.customer_name)}</td><td>${esc(s.product_name)}</td><td>${esc(s.grind_size)}</td>
+          <td class="num">${s.qty}</td><td class="num">${money(s.amount)}</td><td>${esc(s.frequency)}</td><td>${esc(s.after)}</td></tr>`).join('')}
+        <tr class="total"><td></td><td>合計</td><td colspan="4"></td><td class="num">${money(total)}</td><td colspan="2"></td></tr></tbody></table>` : '<div class="empty">沒有待出貨的訂閱</div>';
+      if ($('#all')) $('#all').onchange = (e) => $$('#due [data-sub]').forEach((c) => (c.checked = e.target.checked));
+    } catch (e) { fail(e); }
+  };
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/subscriptions' + qs({ status: $('#status').value }));
+      $('#stats').innerHTML = statCards([['訂閱數', fmt(summary.count)], ['進行中', fmt(summary.active)], ['每月約當營收', money(summary.monthly), 'up']]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>客戶</th><th>產品</th><th class="num">每期數量</th><th class="num">每期金額</th><th>頻率</th><th>下次出貨</th><th>開始</th><th>結束</th><th class="num">已出貨</th><th>狀態</th></tr></thead><tbody>
+        ${data.map((s) => `<tr class="clickable" data-id="${s.subscription_id}"><td>${esc(s.customer_name)}</td><td>${esc(s.product_name)}</td><td class="num">${s.qty}</td><td class="num">${money(s.amount)}</td><td>${esc(s.frequency)}</td>
+          <td>${esc(s.next_ship_date)}</td><td>${esc(s.start_date)}</td><td>${esc(s.end_date)}</td><td class="num">${s.shipped_count}</td><td><span class="tag ${s.status === '進行中' ? '' : 'warn'}">${esc(s.status)}</span></td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">還沒有訂閱</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => subForm(Number(tr.dataset.id), () => { load(); loadDue(); }));
+    } catch (e) { fail(e); }
+  };
+  const generate = async (ids, allow = false) => {
+    const { data } = await api('/subscriptions/generate', { method: 'POST', body: { date: $('#shipDate').value, ids, allow_shortage: allow } });
+    const ok = data.filter((r) => r.ok);
+    const short = data.filter((r) => r.shortage);
+    const bad = data.filter((r) => !r.ok && !r.shortage);
+    if (short.length && confirm(`以下訂閱庫存不足：\n\n${short.map((r) => shortageLines(r.shortages).join('\n')).join('\n')}\n\n仍要產生這 ${short.length} 張銷貨單嗎？`)) {
+      ok.push(...(await generate(short.map((r) => r.subscription_id), true)).ok);
+    }
+    return { ok, bad };
+  };
+  $('#gen').onclick = async () => {
+    const ids = $$('#due [data-sub]:checked').map((c) => Number(c.dataset.sub));
+    if (!ids.length) return toast('請先勾選要出貨的訂閱', true);
+    try {
+      const { ok, bad } = await generate(ids);
+      toast(`已產生 ${ok.length} 張銷貨單${ok.length ? '：' + ok.map((r) => r.sale_no).join('、') : ''}${bad.length ? `；${bad.length} 筆失敗（${bad.map((r) => r.error).join('、')}）` : ''}`, bad.length > 0);
+      loadDue(); load();
+    } catch (e) { fail(e); }
+  };
+  $('#loadDue').onclick = loadDue;
+  $('#shipDate').onchange = loadDue;
+  $('#status').onchange = load;
+  $('#add').onclick = () => subForm(null, () => { load(); loadDue(); });
+  loadDue(); load();
+}
+
+async function subForm(id, reload) {
+  try {
+    const [customers, products] = await Promise.all([lookup('customers', true), lookup('products', true)]);
+    const s = id ? (await api(`/subscriptions/${id}`)).data : { start_date: today(), next_ship_date: today(), frequency: '每月', status: '進行中', qty: 1, channel: 'LINE', payment_method: '轉帳', shipping_fee: 0, sales: [] };
+    const box = openModal(`
+      <h2>${id ? `訂閱 #${id}` : '新增訂閱'}</h2>
+      <form id="f">
+        <div class="form-grid">
+          <label>客戶 *<select name="customer_id" required>${options(customers, 'customer_id', s.customer_id, { blank: '請選擇' })}</select></label>
+          <label>產品 *<select name="product_id" required>${options(products, 'product_id', s.product_id, { blank: '請選擇' })}</select></label>
+          <label>研磨<select name="grind_size">${plainOpts(GRIND, s.grind_size, '')}</select></label>
+          <label>每期數量 *<input name="qty" type="number" step="1" min="1" required value="${esc(s.qty)}"></label>
+          <label>單價<input name="unit_price" type="number" step="any" min="0" value="${esc(s.unit_price)}" placeholder="空白 = 零售價"></label>
+          <label>每期運費<input name="shipping_fee" type="number" step="any" min="0" value="${esc(s.shipping_fee)}"></label>
+          <label>頻率<select name="frequency">${plainOpts(FREQS, s.frequency)}</select></label>
+          <label>下次出貨日 *<input name="next_ship_date" type="date" required value="${esc(s.next_ship_date)}"></label>
+          <label>開始日期 *<input name="start_date" type="date" required value="${esc(s.start_date)}"></label>
+          <label>結束日期<input name="end_date" type="date" value="${esc(s.end_date)}"></label>
+          <label>通路<select name="channel">${plainOpts(CHANNELS, s.channel)}</select></label>
+          <label>付款方式<select name="payment_method">${plainOpts(PAY_METHODS, s.payment_method)}</select></label>
+          <label>狀態<select name="status">${plainOpts(SUB_STATUS, s.status)}</select></label>
+          <label class="full">備註<input name="note" value="${esc(s.note)}"></label>
+        </div>
+        ${s.sales.length ? `<div class="section-title">出貨紀錄</div><div class="table-wrap"><table><thead><tr><th>銷貨日</th><th>單號</th><th class="num">金額</th><th>收款</th></tr></thead><tbody>
+          ${s.sales.map((x) => `<tr class="clickable" data-sale="${x.sale_id}"><td>${esc(x.sale_date)}</td><td>${esc(x.sale_no)}</td><td class="num">${money(x.total_amount)}</td><td>${payTag(x.payment_status)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`, true);
+    const f = $('#f', box);
+    f.product_id.onchange = () => { // 依客戶價格等級帶單價
+      const p = products.find((x) => x.product_id === Number(f.product_id.value));
+      const c = customers.find((x) => x.customer_id === Number(f.customer_id.value));
+      if (p) f.unit_price.value = (c?.price_level === '批發價' && p.wholesale_price != null ? p.wholesale_price : p.retail_price) ?? '';
+    };
+    $$('[data-sale]', box).forEach((tr) => tr.onclick = () => saleForm(Number(tr.dataset.sale), reload));
+    $('#cancel', box).onclick = closeModal;
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api(id ? `/subscriptions/${id}` : '/subscriptions', { method: id ? 'PUT' : 'POST', body: Object.fromEntries(new FormData(f)) });
+        closeModal(); toast('已存檔'); reload?.();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm('確定刪除這個訂閱？')) return;
+      try { await api(`/subscriptions/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 盤點／庫存調整
+const COUNT_ITEM_TYPES = ['生豆', '熟豆', '包材'];
+const ADJ_REASONS = ['試喝', '樣品', '報廢'];
+
+async function pageCounts() {
+  $('#main').innerHTML = `
+    <h2>盤點／庫存調整</h2>
+    <div class="toolbar">
+      <label>起日<input type="date" id="from" value="${monthStart()}"></label>
+      <label>迄日<input type="date" id="to" value="${today()}"></label>
+      <label>類型<select id="ctype">${plainOpts(['盤點', '調整'], null, '全部')}</select></label>
+      <label>品項<select id="itype">${plainOpts(COUNT_ITEM_TYPES, null, '全部')}</select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="addCount" class="primary">＋ 盤點</button><button id="addAdj" class="primary">＋ 試喝／樣品／報廢</button>
+    </div>
+    <p class="hint">盤點：輸入實際數量，差異自動產生<span class="up">盤盈</span>／<span class="down">盤虧</span>。調整：試喝、樣品、報廢直接扣庫存。成本以批號成本（包材用移動平均）計算。盤點或調整過的批號會讓來源進貨單、烘焙批次鎖定。</p>
+    <div class="stats" id="stats"></div>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data, summary } = await api('/stock-counts' + qs({ from: $('#from').value, to: $('#to').value, count_type: $('#ctype').value, item_type: $('#itype').value }));
+      $('#stats').innerHTML = statCards([['筆數', fmt(summary.count)], ['盤盈金額', '+' + money(summary.gain), 'up'], ['盤虧／調整金額', '−' + money(summary.loss), 'down']]);
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>日期</th><th>單號</th><th>類型</th><th>品項</th><th class="num">筆數</th><th>原因</th><th class="num">盤盈</th><th class="num">盤虧／出庫</th><th>備註</th></tr></thead><tbody>
+        ${data.map((c) => `<tr class="clickable" data-id="${c.count_id}"><td>${esc(c.count_date)}</td><td>${esc(c.count_no)}</td><td>${esc(c.count_type)}</td><td>${esc(c.item_type)}</td><td class="num">${c.item_count}</td>
+          <td>${esc(c.reasons || '無差異')}</td>${inAmt(c.gain_amount)}${outAmt(c.loss_amount)}<td>${esc(c.note)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">此區間沒有盤點／調整</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => countForm(null, null, Number(tr.dataset.id), load));
+    } catch (e) { fail(e); }
+  };
+  const pick = (countType) => {
+    const box = openModal(`<h2>${countType === '盤點' ? '新增盤點' : '新增試喝／樣品／報廢'}</h2>
+      <form id="f"><div class="form-grid"><label>品項類型<select name="t">${plainOpts(COUNT_ITEM_TYPES, '熟豆')}</select></label></div>
+      <div class="form-actions"><span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">下一步</button></div></form>`);
+    $('#cancel', box).onclick = closeModal;
+    $('#f', box).onsubmit = (e) => { e.preventDefault(); countForm(countType, $('#f', box).t.value, null, load); };
+  };
+  $('#search').onclick = load;
+  $('#addCount').onclick = () => pick('盤點');
+  $('#addAdj').onclick = () => pick('調整');
+  load();
+}
+
+async function countForm(countType, itemType, id, reload) {
+  try {
+    const c = id ? (await api(`/stock-counts/${id}`)).data : { count_type: countType, item_type: itemType, count_date: today(), items: [] };
+    countType = c.count_type; itemType = c.item_type;
+    const isCount = countType === '盤點';
+    const unitOf = (r) => r.unit || 'kg';
+    const box = openModal(`
+      <h2>${id ? `${esc(countType)} ${esc(c.count_no)}（${esc(itemType)}）` : `新增${esc(itemType)}${isCount ? '盤點' : '調整'}`}</h2>
+      <form id="f">
+        <div class="form-grid">
+          <label>日期 *<input name="count_date" type="date" required value="${esc(c.count_date)}"></label>
+          <label>單號<input name="count_no" value="${esc(c.count_no)}" placeholder="自動產生"></label>
+          <label class="full">備註<input name="note" value="${esc(c.note)}"></label>
+        </div>
+        <p class="hint">${isCount ? '帳面數量 = 日期當天結束時的庫存。只填有盤的品項，空白的不處理；實際數量 = 帳面數量就是無差異。' : '輸入要扣掉的數量與原因，空白的不處理。'}</p>
+        <div class="table-wrap" id="sheet"><div class="empty">載入中…</div></div>
+        <div class="totals"><div class="grand"><span>差異金額</span><span id="tDiff"></span></div></div>
+        <div class="form-actions">
+          ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
+        </div>
+      </form>`, true);
+    const f = $('#f', box);
+    const mine = new Map(c.items.map((i) => [i.item_ref_id, i]));
+    let rows = [];
+    const loadSheet = async () => {
+      const keep = new Map($$('#sheet tr[data-ref]', box).map((tr) => [Number(tr.dataset.ref), { a: $('[data-actual]', tr)?.value, q: $('[data-qty]', tr)?.value, r: $('[data-reason]', tr)?.value }]));
+      rows = (await api('/stock-counts/sheet' + qs({ item_type: itemType, date: f.count_date.value, exclude_count_id: id }))).data;
+      for (const i of c.items) if (!rows.some((r) => r.item_ref_id === i.item_ref_id)) rows.push({ item_ref_id: i.item_ref_id, code: i.code, name: i.name, system_qty: i.system_qty, unit_cost: i.unit_cost });
+      $('#sheet', box).innerHTML = rows.length ? `<table class="items"><thead><tr><th>${itemType === '包材' ? '包材' : '批號'}</th><th>品項</th><th class="num">帳面數量</th><th class="num">單位成本</th>
+        ${isCount ? '<th style="width:120px">實際數量</th><th class="num">差異</th>' : '<th style="width:110px">扣除數量</th><th style="width:100px">原因</th>'}<th class="num">金額</th></tr></thead><tbody>
+        ${rows.map((r) => {
+          const m = mine.get(r.item_ref_id); const k = keep.get(r.item_ref_id) || {};
+          return `<tr data-ref="${r.item_ref_id}" data-sys="${r.system_qty}" data-cost="${r.unit_cost}"><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td class="num">${fmt(r.system_qty, 2)} ${esc(unitOf(r))}</td><td class="num">${fmt(r.unit_cost, 2)}</td>
+            ${isCount ? `<td><input data-actual type="number" step="any" min="0" value="${esc(k.a ?? m?.actual_qty ?? '')}" class="num"></td><td class="num" data-diff></td>`
+              : `<td><input data-qty type="number" step="any" min="0" value="${esc(k.q ?? (m ? -m.diff_qty : ''))}" class="num"></td><td><select data-reason>${plainOpts(ADJ_REASONS, k.r || m?.reason || '試喝')}</select></td>`}
+            <td class="num" data-amt></td></tr>`;
+        }).join('')}</tbody></table>` : `<div class="empty">${f.count_date.value} 沒有任何${itemType}庫存</div>`;
+      calc();
+    };
+    const calc = () => {
+      let sum = 0;
+      $$('#sheet tr[data-ref]', box).forEach((tr) => {
+        const sys = Number(tr.dataset.sys); const cost = Number(tr.dataset.cost);
+        let diff = null;
+        if (isCount) { const v = $('[data-actual]', tr).value; if (v !== '') diff = r2(Number(v) - sys); }
+        else { const v = Number($('[data-qty]', tr).value); if (v) diff = -v; }
+        if (isCount) $('[data-diff]', tr).innerHTML = diff === null ? '' : diff > 0 ? `<span class="up">+${fmt(diff, 2)}</span>` : diff < 0 ? `<span class="down">${fmt(diff, 2)}</span>` : '0';
+        const amt = diff === null ? 0 : r2(diff * cost);
+        sum += amt;
+        $('[data-amt]', tr).innerHTML = diff ? `<span class="${amt >= 0 ? 'up' : 'down'}">${amt >= 0 ? '+' : '−'}${money(Math.abs(amt))}</span>` : '';
+      });
+      $('#tDiff', box).innerHTML = `<span class="${sum >= 0 ? 'up' : 'down'}">${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))}</span>`;
+    };
+    $('#sheet', box).addEventListener('input', calc);
+    f.count_date.onchange = loadSheet;
+    $('#cancel', box).onclick = closeModal;
+    await loadSheet();
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { ...Object.fromEntries(new FormData(f)), count_type: countType, item_type: itemType };
+      body.items = $$('#sheet tr[data-ref]', box).map((tr) => (isCount
+        ? { item_ref_id: Number(tr.dataset.ref), actual_qty: $('[data-actual]', tr).value }
+        : { item_ref_id: Number(tr.dataset.ref), qty: $('[data-qty]', tr).value, reason: $('[data-reason]', tr).value }))
+        .filter((it) => (isCount ? it.actual_qty !== '' : Number(it.qty) > 0));
+      try {
+        const res = await api(id ? `/stock-counts/${id}` : '/stock-counts', { method: id ? 'PUT' : 'POST', body });
+        closeModal(); toast(`已存檔 ${res.data.count_no}`); reload?.();
+      } catch (err) { fail(err); }
+    };
+    if (id) $('#del', box).onclick = async () => {
+      if (!confirm(`確定刪除 ${c.count_no}？相關的庫存異動會一起刪除。`)) return;
+      try { await api(`/stock-counts/${id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 產品配方
+async function pageRecipes() {
+  $('#main').innerHTML = `
+    <h2>產品配方</h2>
+    <p class="hint">配方只放包材（熟豆依產品主檔的「使用熟豆品項 × 每包淨重」扣）。銷貨存檔時依「每個產品用量 × 數量」扣包材庫存（包裝耗用），包材成本算進銷貨成本。修改配方不影響已存檔的銷貨單。點產品編輯配方。</p>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  try {
+    const [products, { data: recipes }] = await Promise.all([lookup('products', true), api('/recipes')]);
+    const rmap = new Map(recipes.map((r) => [r.product_id, r]));
+    const load = async () => pageRecipes();
+    $('#list').innerHTML = products.length ? `<table><thead><tr><th>料號</th><th>產品</th><th>類別</th><th>使用熟豆</th><th class="num">淨重 g</th><th>配方（包材 × 每個用量）</th></tr></thead><tbody>
+      ${products.map((p) => `<tr class="clickable" data-id="${p.product_id}"><td>${esc(p.sku)}</td><td>${esc(p.name)}${p.is_active ? '' : '（停用）'}</td><td>${esc(p.category)}</td><td>${esc(p.roasted_bean_name)}</td><td class="num">${fmt(p.net_weight_g)}</td>
+        <td>${rmap.get(p.product_id) ? esc(rmap.get(p.product_id).recipe_text) : '<span class="tag warn">未設定</span>'}</td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty">還沒有產品</div>';
+    $$('#list tr.clickable').forEach((tr) => tr.onclick = () => recipeForm(Number(tr.dataset.id), load));
+  } catch (e) { fail(e); }
+}
+
+async function recipeForm(productId, reload) {
+  try {
+    const [packs, { data: r }] = await Promise.all([lookup('packaging-items', true), api(`/recipes/${productId}`)]);
+    const row = (it = {}) => `<tr><td><select data-k="packaging_id">${options(packs, 'packaging_id', it.packaging_id, { blank: '選擇包材', label: (k) => `${k.name}（${k.unit}）` })}</select></td>
+      <td><input data-k="qty" type="number" step="any" min="0" value="${esc(it.qty)}" class="num"></td><td class="num">${it.cost != null ? fmt(it.cost, 2) : ''}</td><td><button type="button" class="link" data-del>刪除</button></td></tr>`;
+    const box = openModal(`
+      <h2>配方：${esc(r.name)}</h2>
+      <form id="f">
+        <div class="table-wrap"><table class="items"><thead><tr><th style="min-width:240px">包材</th><th style="width:110px">每個產品用量</th><th class="num">目前成本</th><th></th></tr></thead>
+          <tbody id="items">${(r.items.length ? r.items : [{}]).map(row).join('')}</tbody></table></div>
+        <p class="hint">例：「耶加雪菲 濾掛 10入」= 濾掛袋 10 個 ＋ 外盒 1 個 ＋ 標籤 1 張。目前包材成本合計約 ${fmt(r.packaging_cost, 2)} 元／個（依移動平均成本）。</p>
+        <div class="form-actions"><button type="button" id="addItem">＋ 新增一筆</button><span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">存檔</button></div>
+      </form>`);
+    $('#items', box).addEventListener('click', (e) => { if (e.target.matches('[data-del]')) e.target.closest('tr').remove(); });
+    $('#addItem', box).onclick = () => $('#items', box).insertAdjacentHTML('beforeend', row());
+    $('#cancel', box).onclick = closeModal;
+    $('#f', box).onsubmit = async (e) => {
+      e.preventDefault();
+      const items = $$('#items tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value]))).filter((it) => it.packaging_id || it.qty);
+      try { await api(`/recipes/${productId}`, { method: 'PUT', body: { items } }); closeModal(); toast('已存檔配方'); reload?.(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
+}
+
 // ---------------------------------------------------------------- 路由
 const ROUTES = {
   purchases: pagePurchases,
@@ -1427,6 +1986,11 @@ const ROUTES = {
   'customer-history': pageCustomerHistory,
   roasts: pageRoasts,
   'opening-stock': pageOpening,
+  returns: pageReturns,
+  invoices: pageInvoices,
+  subscriptions: pageSubscriptions,
+  'stock-counts': pageCounts,
+  recipes: pageRecipes,
   bank: pageBank,
   expenses: pageExpenses,
   receivables: pageReceivables,

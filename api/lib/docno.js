@@ -7,6 +7,8 @@ const SOURCES = {
   S: ['sales', 'sale_no'],             // 銷貨單
   T: ['bank_transactions', 'txn_no'],  // 銀行收支
   E: ['expenses', 'expense_no'],       // 費用
+  RT: ['returns', 'return_no'],        // 退貨／折讓
+  C: ['stock_counts', 'count_no'],     // 盤點／庫存調整
 };
 
 const pad2 = (n) => String(n).padStart(2, '0');
