@@ -18,6 +18,7 @@ export const MODULE_OF = {
   'bank-transactions': 'finance', expenses: 'finance', finance: 'finance', 'bank-accounts': 'finance', 'expense-categories': 'finance', reconcile: 'finance',
   reports: 'reports',
   users: 'system', 'audit-logs': 'system', backup: 'system',
+  'bank-codes': 'finance', 'supplier-accounts': 'purchasing',
 };
 export const MODULE_LABELS = {
   products: '主檔（產品、生豆、包材、供應商）', customers: '客戶', purchasing: '進貨', production: '烘焙／盤點／期初', inventory: '庫存查詢',
@@ -40,6 +41,7 @@ export function permsOf(role) {
 export function assertCan(user, resource, method) {
   const module = MODULE_OF[resource];
   if (!module) return; // me 等不需權限
+  if (resource === 'bank-codes' && method === 'GET') return; // 銀行代碼對照表大家都能查
   const p = permsOf(user.role);
   const need = method === 'GET' ? 'read' : 'write';
   if (!p[need].includes(module)) {

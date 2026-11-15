@@ -97,6 +97,7 @@ export async function handleMaster(resourceKey, id, request, env) {
   if (!id && method === 'POST') {
     const body = await readJson(request);
     const data = clean(r.fields, body);
+    r.normalize?.(data);
     check(r, data);
     const cols = Object.keys(data);
     const insert = db
@@ -123,6 +124,7 @@ export async function handleMaster(resourceKey, id, request, env) {
     const current = await getOne(db, r, pk);
     const body = await readJson(request);
     const data = clean(r.fields, body, { partial: method === 'PATCH' });
+    r.normalize?.(data);
     check(r, { ...current, ...data });
     const cols = Object.keys(data);
     const stmts = [];

@@ -119,20 +119,34 @@ export const resources = {
   },
   'bank-accounts': {
     table: 'bank_accounts', pk: 'account_id', label: '銀行帳戶',
-    search: ['account_name', 'bank_name', 'account_no_masked'],
+    search: ['account_name', 'bank_name', 'account_no_masked', 'bank_code'],
     fields: {
       account_name: { type: 'text', required: true },
       account_type: { type: 'enum', values: ['銀行', '現金', 'LINE Pay', '信用卡收單', '電商平台'], default: '銀行' },
+      bank_code: { type: 'text' },
       bank_name: { type: 'text' },
+      branch_name: { type: 'text' },
+      branch_code: { type: 'text' },
+      account_no: { type: 'text' },
+      account_holder: { type: 'text' },
       account_no_masked: { type: 'text' },
       opening_balance: { type: 'number', default: 0 },
       opening_date: { type: 'date' },
       note: { type: 'text' },
       is_active: { type: 'bool', default: 1 },
     },
-    // 只存帳號末四碼，避免完整帳號留在系統裡
+    // 完整帳號只存數字；末四碼由完整帳號自動產生（清單顯示用）
+    normalize(row) {
+      if (row.account_no !== undefined && row.account_no !== null) {
+        row.account_no = String(row.account_no).replace(/[\s\-－‐]/g, '') || null;
+        if (row.account_no) row.account_no_masked = row.account_no.slice(-4);
+      }
+    },
     validate(row) {
-      if (row.account_no_masked && !/^\d{1,4}$/.test(row.account_no_masked)) return '帳號只填末四碼（最多 4 位數字），不要存完整帳號';
+      if (row.bank_code && !/^\d{3}$/.test(row.bank_code)) return '銀行代號必須是 3 位數字';
+      if (row.branch_code && !/^\d{4}$/.test(row.branch_code)) return '分行代號是 4 位數字（可留空）';
+      if (row.account_no && !/^\d{6,16}$/.test(row.account_no)) return '帳號只能是 6～16 位數字（空白、橫線會自動去掉）';
+      if (row.account_no_masked && !/^\d{1,4}$/.test(row.account_no_masked)) return '帳號末四碼最多 4 位數字';
       if (row.opening_balance < 0) return '期初餘額不可為負數';
       return null;
     },

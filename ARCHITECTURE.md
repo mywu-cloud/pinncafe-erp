@@ -76,10 +76,24 @@
 | address | text | 地址 |
 | country | text | 國家（國外生豆商） |
 | payment_terms | text | 付款條件（現結／月結 30 天） |
-| bank_info | text | 匯款資訊 |
+| bank_info | text | 匯款備註（舊欄位；帳戶請用 2.1.1 匯款帳戶） |
 | note | text | 備註 |
 | is_active | bool | 是否啟用 |
 | created_at / updated_at | datetime | |
+
+#### 2.1.1 供應商匯款帳戶 `supplier_bank_accounts`（一家可多個）
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| sba_id | PK | |
+| supplier_id | FK → suppliers **IDX** | |
+| bank_code | text | 3 碼銀行代號（必須在 `bank_codes` 中） |
+| branch_name、branch_code | text | 分行名稱、4 碼分行代號（選填） |
+| account_no | text | 完整帳號（只存數字，6～16 碼） |
+| account_holder | text | 戶名 |
+| is_default | bool | 預設帳戶（每家最多一個；沒有預設時第一個啟用的自動成為預設） |
+| is_active | bool | 已用於付款的帳戶不能刪除，只能停用 |
+| note、created_at、updated_at | | |
 
 ### 2.2 客戶 `customers`
 
@@ -189,15 +203,33 @@
 | account_id | PK | |
 | account_name | text | 帳戶名稱（例：台銀公司戶、門市現金、LINE Pay） |
 | account_type | enum | 銀行／現金／LINE Pay／信用卡收單／電商平台 |
-| bank_name | text | 銀行名稱 |
-| account_no_masked | text | 帳號末四碼（最多 4 位數字，不存完整帳號） |
+| bank_code | text | 3 碼銀行代號（`bank_codes`） |
+| bank_name | text | 銀行名稱（選銀行代號自動帶入） |
+| branch_name、branch_code | text | 分行名稱、4 碼分行代號（選填） |
+| account_no | text | 完整帳號（只存數字，6～16 碼；清單只顯示末四碼） |
+| account_holder | text | 戶名 |
+| account_no_masked | text | 帳號末四碼（由 account_no 自動產生；舊資料可只有這欄） |
 | opening_balance | decimal | 期初餘額（不可為負） |
 | opening_date | date | 期初日期；該帳戶的交易日期不可早於此日 |
 | note | text | 備註 |
 | is_active | bool | |
 | created_at / updated_at | datetime | |
 
-> 現金、LINE Pay、刷卡收單也各建一個帳戶，所有收付款都透過帳戶登錄。
+> 現金、LINE Pay、刷卡收單也各建一個帳戶，所有收付款都透過帳戶登錄。銀行帳戶依台灣慣例以「銀行代號＋帳號」建立，選代號、填帳號後自動帶出顯示名稱（例：玉山 5678）。
+
+#### 2.8.1 銀行代碼 `bank_codes`
+
+| 欄位 | 說明 |
+|---|---|
+| code | PK，3 碼總機構代號（跨行匯款用） |
+| name | 機構名稱 |
+| category | 本國銀行／外商銀行／郵局／信用合作社／農漁會／其他 |
+| is_builtin | 內建代號（`api/lib/bankcodes.js`；表格為空時第一次讀取自動寫入，可「補回內建代號」） |
+| is_active、note、created_at、updated_at | |
+
+- 內建清單參考中央銀行「金融機構代碼一覽表」與財金公司跨行通匯參加機構，含本國銀行、郵局、外商銀行、信用合作社，以及農漁會資訊中心共用代號（910／951／952／954 等）；個別農漁會請自行新增。
+- 銀行合併、更名時直接修改名稱或停用；內建代號不能刪除，已有帳戶使用的代號也不能刪除。
+- 不內建 7 碼分行代號，分行名稱與 4 碼分行代號在各帳戶上自行填寫。
 
 ### 2.9 熟豆品項 `roasted_beans`（Phase 2 新增）
 
@@ -491,9 +523,14 @@
 | transfer_txn_id | int | 帳戶互轉的另一筆 |
 | reconciled | bool | 是否已對帳（Phase 5） |
 | bank_ref_no | text | 銀行交易序號（Phase 5 匯入 CSV 時比對用） |
+| payee_account_id | FK → supplier_bank_accounts | 付款給供應商時選的收款帳戶 |
+| payee_info | text | 付款當時收款帳戶的快照（銀行代號、分行、戶名、帳號），之後改主檔不影響歷史 |
+| fee_txn_id | int | 這筆付款的匯費（另一筆「手續費」出帳） |
 | created_by | text | 操作者 email |
 | created_at / updated_at | datetime | |
 
+> 匯費：出帳時填匯費，系統自動另建一筆同帳戶、同日的「手續費」出帳（摘要「匯費（付款編號）」）；修改付款時一起更新，匯費清空就刪除，刪除付款時一起刪除。已對帳的匯費不能改金額、日期、帳戶或刪除。只有出帳可以填匯費。
+>
 > 帳戶餘額 = 期初餘額 + Σ入帳 − Σ出帳（依日期即可算出任一天餘額）。原規格的 `ref_doc_type / ref_doc_id` 改由 `payment_allocations` 取代（一筆可沖多張單）。
 
 ### 5.2 收付款沖帳 `payment_allocations`
@@ -981,6 +1018,10 @@ API：
 | 8 | 已對帳鎖定 | 已對帳收支鎖住帳戶、日期、方向、金額與刪除；已對帳的對帳單明細只能改摘要、序號、餘額 |
 | 9 | 手動對帳單 | 對帳頁可手動輸入／修改對帳單明細，手動輸入時存摺餘額必填 |
 | 10 | 期初 | 對帳頁可改帳戶期初（系統起點），另設對帳起點（存摺餘額），並逐日檢查存摺餘額是否連續 |
+| 11 | 銀行代號＋帳號 | 自己的帳戶與供應商帳戶**都存完整帳號**，清單只顯示末四碼，打開才看得到完整帳號、可一鍵複製 |
+| 12 | 銀行代碼表 | 內建 3 碼總機構代號（可新增、改名、停用）；分行自行填寫，不內建 7 碼分行表 |
+| 13 | 供應商帳戶 | 每家可多個匯款帳戶、一個預設；付款（出帳）選供應商後帶出預設帳戶，可改選，收支上存帳戶快照 |
+| 14 | 匯費 | 付款時一併登錄匯費，自動另建「手續費」出帳並與付款連動 |
 
 ### 角色權限
 
@@ -1000,6 +1041,7 @@ API：
 GET = 查看、其他方法 = 修改；後端每個請求都檢查（`api/lib/perm.js`），前端依 `/api/me` 隱藏沒有權限的選單。
 
 **既有資料庫升級**：直接跑 `db/schema.sql`（只新增 `users`、`audit_logs`、`bank_import_profiles`、`bank_statement_lines`、`bank_statement_openings` 五張表）。**要在部署新版程式之前建表**，否則登入時找不到 `users` 表。
+銀行代號功能另需先跑 `db/migrations/006_bank_codes.sql`（新增 `bank_codes`、`supplier_bank_accounts`，`bank_accounts` 加 5 個欄位、`bank_transactions` 加 3 個欄位；只能跑一次），再跑 `db/schema.sql`。
 
 ### API 一覽（Phase 5 新增）
 
@@ -1029,3 +1071,10 @@ GET = 查看、其他方法 = 修改；後端每個請求都檢查（`api/lib/pe
 | `/api/reconcile/{account_id}/account-opening` | PUT `{ opening_balance, opening_date }` | 修改帳戶期初 |
 | `/api/import/{resource}` | GET／POST `{ rows, dry_run }` | 匯入範本欄位；檢查／匯入（錯誤回 400 `{ errors: [{ line, error }] }`） |
 | `/api/backup` | GET | 全部資料表 JSON（前端轉 Excel） |
+| `/api/bank-codes` | GET（`?q=&category=&active=`）／POST `{ code, name, category, note? }` | 銀行代碼對照表（所有角色都可查；表格為空時自動寫入內建清單） |
+| `/api/bank-codes/{code}` | GET／PUT／DELETE | 修改名稱、類別、停用；刪除（內建或使用中不可刪） |
+| `/api/bank-codes/restore` | POST | 補回缺少的內建代號 |
+| `/api/supplier-accounts` | GET（`?supplier_id=&active=`）／POST `{ supplier_id, bank_code, account_no, account_holder?, branch_name?, branch_code?, is_default?, is_active?, note? }` | 供應商匯款帳戶 |
+| `/api/supplier-accounts/{id}` | GET／PUT／DELETE | 已用於付款不可刪 |
+
+銀行收支 POST／PUT 另接受 `payee_account_id`、`fee`（出帳匯費）；GET 另回傳 `payee_info`、`fee_amount`、`fee_txn_no`、`fee_parent_no`。

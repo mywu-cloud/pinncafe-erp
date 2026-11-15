@@ -8,11 +8,14 @@
 //   3. 單據收付款狀態依已沖金額自動更新（lib/payment.js）
 //   4. 帳戶互轉 = 來源帳戶出帳 ＋ 目的帳戶入帳（各一筆，transfer_txn_id 互指），不可沖帳
 //   5. 交易日期不可早於帳戶期初日期
+//   6. 付款給供應商可選收款帳戶（supplier_bank_accounts），收支上另存一份當時的帳戶資料快照 payee_info
+//   7. 出帳可一併登錄匯費：自動另建一筆同帳戶、同日的「手續費」出帳（fee_txn_id 指向它），修改／刪除時一起處理
 // 收支、沖帳、狀態更新在同一個 D1 batch（單一交易）。
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, lastSeq, seqStatement } from '../lib/docno.js';
 import { DOCS, statusStatement, docBalance, paidExpr, netExpr } from '../lib/payment.js';
+import { payeeText } from '../master/bankaccounts.js';
 
 export const DIRECTIONS = ['入帳', '出帳'];
 export const CATEGORIES = ['銷貨收款', '進貨付款', '費用', '轉帳', '手續費', '利息', '其他'];
@@ -61,6 +64,25 @@ async function prepare(db, body, { excludeTxnId = null } = {}) {
     counterparty = counterparty || s.name;
   }
 
+  // ---- 收款帳戶（付款給供應商）與匯費 ----
+  let payee_account_id = null;
+  let payee_info = null;
+  if (body.payee_account_id && body.direction === '出帳') {
+    payee_account_id = toInt(body.payee_account_id, '收款帳戶');
+    const pa = await db.prepare('SELECT s.*, c.name AS bank_name FROM supplier_bank_accounts s LEFT JOIN bank_codes c ON c.code = s.bank_code WHERE s.sba_id = ?').bind(payee_account_id).first();
+    if (!pa) throw new HttpError(400, '收款帳戶不存在');
+    if (!supplier_id) supplier_id = pa.supplier_id;
+    if (pa.supplier_id !== supplier_id) throw new HttpError(400, '收款帳戶不屬於選擇的供應商');
+    payee_info = payeeText(pa);
+    if (!counterparty) counterparty = (await db.prepare('SELECT name FROM suppliers WHERE supplier_id = ?').bind(supplier_id).first())?.name ?? null;
+  }
+  let fee = 0;
+  if (body.fee !== undefined && body.fee !== null && body.fee !== '') {
+    fee = round(Number(body.fee));
+    if (!Number.isFinite(fee) || fee < 0) throw new HttpError(400, '匯費不可為負數');
+    if (fee > 0 && body.direction !== '出帳') throw new HttpError(400, '只有出帳可以登錄匯費');
+  }
+
   // ---- 沖帳 ----
   const raw = Array.isArray(body.allocations) ? body.allocations : [];
   const allocations = [];
@@ -94,12 +116,20 @@ async function prepare(db, body, { excludeTxnId = null } = {}) {
       customer_id, supplier_id, counterparty,
       description: (body.description || '').trim() || null,
       bank_ref_no: (body.bank_ref_no || '').trim() || null,
+      payee_account_id, payee_info,
     },
     allocations,
+    fee,
   };
 }
 
-const COLS = ['account_id', 'txn_date', 'direction', 'amount', 'category', 'customer_id', 'supplier_id', 'counterparty', 'description', 'bank_ref_no'];
+const COLS = ['account_id', 'txn_date', 'direction', 'amount', 'category', 'customer_id', 'supplier_id', 'counterparty', 'description', 'bank_ref_no', 'payee_account_id', 'payee_info'];
+
+/** 匯費那筆「手續費」出帳的內容 */
+const feeRow = (row, parentNo, fee) => ({
+  account_id: row.account_id, txn_date: row.txn_date, direction: '出帳', amount: fee, category: '手續費',
+  supplier_id: row.supplier_id, counterparty: row.counterparty, description: `匯費（${parentNo}）`,
+});
 
 function insertTxn(db, txnNo, row, user, transferNo = null) {
   return db.prepare(
@@ -131,8 +161,11 @@ async function nextNos(db, date, count) {
 async function getTxn(db, id) {
   const t = await db.prepare(
     `SELECT t.*, a.account_name, a.account_type, c.name AS customer_name, s.name AS supplier_name,
-            o.txn_no AS transfer_txn_no, o.account_id AS transfer_account_id, oa.account_name AS transfer_account_name
+            o.txn_no AS transfer_txn_no, o.account_id AS transfer_account_id, oa.account_name AS transfer_account_name,
+            f.amount AS fee_amount, f.txn_no AS fee_txn_no, f.reconciled AS fee_reconciled,
+            (SELECT x.txn_no FROM bank_transactions x WHERE x.fee_txn_id = t.txn_id) AS fee_parent_no
      FROM bank_transactions t
+     LEFT JOIN bank_transactions f ON f.txn_id = t.fee_txn_id
      JOIN bank_accounts a ON a.account_id = t.account_id
      LEFT JOIN customers c ON c.customer_id = t.customer_id
      LEFT JOIN suppliers s ON s.supplier_id = t.supplier_id
@@ -324,9 +357,13 @@ export async function handleBank(id, request, env, user) {
       return json({ data: await getTxn(db, row.txn_id) }, 201);
     }
     const p = await prepare(db, body);
-    const { nos, ymd, last } = await nextNos(db, p.row.txn_date, 1);
+    const { nos, ymd, last } = await nextNos(db, p.row.txn_date, p.fee > 0 ? 2 : 1);
     await db.batch([
       insertTxn(db, nos[0], p.row, user),
+      ...(p.fee > 0 ? [
+        insertTxn(db, nos[1], feeRow(p.row, nos[0], p.fee), user),
+        db.prepare('UPDATE bank_transactions SET fee_txn_id = (SELECT txn_id FROM bank_transactions WHERE txn_no = ?) WHERE txn_no = ?').bind(nos[1], nos[0]),
+      ] : []),
       ...allocStatements(db, nos[0], p.allocations),
       ...statusStatements(db, p.allocations),
       seqStatement(db, 'T', ymd, last),
@@ -374,7 +411,31 @@ export async function handleBank(id, request, env, user) {
     }
     if (body.category === '轉帳') throw new HttpError(400, '一般收支不能改成帳戶互轉，請刪除後重新登錄');
     const p = await prepare(db, body, { excludeTxnId: tid });
+    // 匯費：新增、修改或刪除對應的手續費出帳（已對帳的匯費不能改金額、日期、帳戶或刪除）
+    const feeStmts = [];
+    const feeGiven = body.fee !== undefined;
+    let feeSeq = null;
+    if (feeGiven && cur.fee_txn_id) {
+      const ft = await db.prepare('SELECT * FROM bank_transactions WHERE txn_id = ?').bind(cur.fee_txn_id).first();
+      const changing = !p.fee || Math.abs(p.fee - ft.amount) >= EPS || ft.txn_date !== p.row.txn_date || ft.account_id !== p.row.account_id;
+      if (ft.reconciled && changing) throw new HttpError(409, `匯費 ${ft.txn_no} 已對帳，不能修改或刪除；要改請先到「銀行對帳」取消對帳`);
+      if (p.fee > 0) {
+        const fr = feeRow(p.row, cur.txn_no, p.fee);
+        feeStmts.push(db.prepare('UPDATE bank_transactions SET account_id = ?, txn_date = ?, amount = ?, supplier_id = ?, counterparty = ?, updated_at = ? WHERE txn_id = ?')
+          .bind(fr.account_id, fr.txn_date, fr.amount, fr.supplier_id, fr.counterparty, nowTW(), ft.txn_id));
+      } else {
+        feeStmts.push(db.prepare('UPDATE bank_transactions SET fee_txn_id = NULL WHERE txn_id = ?').bind(tid));
+        feeStmts.push(db.prepare('DELETE FROM payment_allocations WHERE txn_id = ?').bind(ft.txn_id));
+        feeStmts.push(db.prepare('DELETE FROM bank_transactions WHERE txn_id = ?').bind(ft.txn_id));
+      }
+    } else if (feeGiven && p.fee > 0) {
+      const { nos, ymd, last } = await nextNos(db, p.row.txn_date, 1);
+      feeSeq = seqStatement(db, 'T', ymd, last);
+      feeStmts.push(insertTxn(db, nos[0], feeRow(p.row, cur.txn_no, p.fee), user));
+      feeStmts.push(db.prepare('UPDATE bank_transactions SET fee_txn_id = (SELECT txn_id FROM bank_transactions WHERE txn_no = ?) WHERE txn_id = ?').bind(nos[0], tid));
+    }
     await db.batch([
+      ...feeStmts, ...(feeSeq ? [feeSeq] : []),
       db.prepare(`UPDATE bank_transactions SET ${COLS.map((c) => `${c} = ?`).join(', ')}, updated_at = ? WHERE txn_id = ?`)
         .bind(...COLS.map((c) => p.row[c] ?? null), nowTW(), tid),
       db.prepare('DELETE FROM payment_allocations WHERE txn_id = ?').bind(tid),
@@ -387,12 +448,13 @@ export async function handleBank(id, request, env, user) {
   // ---- 刪除（互轉兩筆一起刪；沖帳一併刪除並重算單據狀態）----
   if (method === 'DELETE') {
     const cur = await getTxn(db, tid);
-    const ids = [tid, cur.transfer_txn_id].filter(Boolean);
+    const ids = [tid, cur.transfer_txn_id, cur.fee_txn_id].filter(Boolean); // 付款的匯費一起刪
     const rec = await db.prepare(`SELECT txn_no FROM bank_transactions WHERE reconciled = 1 AND txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids).first();
     if (rec) throw new HttpError(409, `${rec.txn_no} 已對帳，不能刪除；要刪請先到「銀行對帳」取消對帳`);
     await db.batch([
       db.prepare(`DELETE FROM payment_allocations WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),
-      db.prepare(`UPDATE bank_transactions SET transfer_txn_id = NULL WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),
+      db.prepare(`UPDATE bank_transactions SET transfer_txn_id = NULL, fee_txn_id = NULL WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),
+      db.prepare(`UPDATE bank_transactions SET fee_txn_id = NULL WHERE fee_txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids), // 直接刪匯費：解除付款上的連結
       db.prepare(`DELETE FROM bank_transactions WHERE txn_id IN (${ids.map(() => '?').join(',')})`).bind(...ids),
       ...statusStatements(db, cur.allocations),
     ]);

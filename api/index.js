@@ -22,6 +22,7 @@ import { handleRecipes } from './master/recipes.js';
 import { handleExpenses } from './finance/expenses.js';
 import { handleFinance } from './finance/reports.js';
 import { handleReconcile } from './finance/reconcile.js';
+import { handleBankCodes, handleSupplierAccounts } from './master/bankaccounts.js';
 import { handleReports } from './reports/reports.js';
 import { handleUsers, handleAuditLogs } from './system/users.js';
 import { handleImport, handleBackup } from './system/data.js';
@@ -49,6 +50,8 @@ async function route(request, env, user) {
   if (resource === 'expenses') return handleExpenses(id, request, env, email);
   if (resource === 'finance') return handleFinance(id, request, env);
   if (resource === 'reconcile') return handleReconcile(id, extra, request, env, email);
+  if (resource === 'bank-codes') return handleBankCodes(id, request, env);
+  if (resource === 'supplier-accounts') return handleSupplierAccounts(id, request, env);
   if (resource === 'inventory') return handleInventory(id, request, env);
   if (resource === 'reports') return handleReports(id, request, env);
   if (resource === 'users') return handleUsers(id, request, env, user);

@@ -11,7 +11,8 @@
     "db:remote:migrate:phase4": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/005_phase4.sql",
     "db:remote:seed": "wrangler d1 execute pinncafe-erp --remote --file=db/seed.sql",
     "dev": "wrangler pages dev",
-    "deploy": "wrangler pages deploy"
+    "deploy": "wrangler pages deploy",
+    "db:remote:migrate:bankcodes": "wrangler d1 execute pinncafe-erp --remote --file=db/migrations/006_bank_codes.sql"
   },
   "devDependencies": {
     "wrangler": "^3.114.17"

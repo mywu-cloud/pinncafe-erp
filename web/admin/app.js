@@ -79,7 +79,7 @@ const MASTERS = {
     fields: [
       ['name', '名稱', 'text', { required: true }], ['tax_id', '統一編號'], ['contact_name', '聯絡人'], ['phone', '電話'],
       ['email', 'Email'], ['country', '國家'], ['payment_terms', '付款條件（現結／月結 30 天）'],
-      ['address', '地址', 'text', { full: true }], ['bank_info', '匯款資訊', 'text', { full: true }], ['note', '備註', 'textarea', { full: true }],
+      ['address', '地址', 'text', { full: true }], ['bank_info', '匯款備註（舊資料；帳戶請填下方「匯款帳戶」）', 'text', { full: true }], ['note', '備註', 'textarea', { full: true }],
     ],
   },
   customers: {
@@ -138,15 +138,18 @@ const MASTERS = {
   },
   'bank-accounts': {
     title: '銀行帳戶', pk: 'account_id',
-    cols: [['account_name', '帳戶名稱'], ['account_type', '類型'], ['bank_name', '銀行'], ['account_no_masked', '帳號末四碼'], ['opening_balance', '期初餘額', 'num'], ['opening_date', '期初日期']],
+    cols: [['account_name', '帳戶名稱'], ['account_type', '類型'], ['bank_code', '銀行', (r) => esc(bankLabel(r))], ['account_no_masked', '帳號', (r) => esc(maskNo(r.account_no || r.account_no_masked))], ['opening_balance', '期初餘額', 'num'], ['opening_date', '期初日期']],
     fields: [
-      ['account_name', '帳戶名稱', 'text', { required: true }],
       ['account_type', '類型', 'enum', { values: ['銀行', '現金', 'LINE Pay', '信用卡收單', '電商平台'], noBlank: true }],
-      ['bank_name', '銀行名稱'], ['account_no_masked', '帳號末四碼（不要填完整帳號）'],
+      ['bank_code', '銀行代號', 'bankcode'],
+      ['branch_name', '分行名稱'], ['branch_code', '分行代號（4 碼，選填）'],
+      ['account_no', '帳號（完整）', 'accountno'], ['account_holder', '戶名'],
+      ['account_name', '帳戶名稱（顯示用）', 'text', { required: true, placeholder: '例：玉山 1234；選銀行、填帳號後自動帶入' }],
+      ['bank_name', '銀行名稱', 'text', { hidden: true }],
       ['opening_balance', '期初餘額', 'number'], ['opening_date', '期初日期', 'date'],
       ['note', '備註', 'textarea', { full: true }],
     ],
-    hint: '現金、LINE Pay、刷卡收單也各建一個帳戶，收款時選對帳戶，餘額才會對得上。期初日期建議填開帳日的前一天，交易日期不可早於期初日期。',
+    hint: '銀行帳戶依台灣慣例填「銀行代號＋帳號」，清單只顯示末四碼，打開才看得到完整帳號。現金、LINE Pay、刷卡收單也各建一個帳戶（不用填銀行代號），收款時選對帳戶，餘額才會對得上。期初日期建議填開帳日的前一天，交易日期不可早於期初日期。找不到銀行請到「主檔 → 銀行代碼」新增。',
   },
   'expense-categories': {
     title: '費用類別', pk: 'category_id',
@@ -158,6 +161,18 @@ const MASTERS = {
     ],
   },
 };
+
+// ---------------------------------------------------------------- 銀行代號／帳號共用
+const maskNo = (no) => (no ? (String(no).length > 4 ? '＊＊＊＊' + String(no).slice(-4) : String(no)) : '');
+const bankLabel = (r) => (r.bank_code ? `(${r.bank_code}) ${r.bank_name || ''}`.trim() : r.bank_name || '');
+const fmtAcctNo = (no) => String(no || '').replace(/(\d{4})(?=\d)/g, '$1-'); // 每 4 碼一段，好讀
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); toast('已複製：' + t); } catch { prompt('請手動複製', t); }
+}
+const bankCodeOpts = (codes, sel) => `<option value="">（請選擇）</option>` + ['本國銀行', '郵局', '外商銀行', '信用合作社', '農漁會', '其他'].map((cat) => {
+  const rows = codes.filter((c) => c.category === cat && (c.is_active || c.code === sel));
+  return rows.length ? `<optgroup label="${cat}">${rows.map((c) => `<option value="${c.code}" data-name="${esc(c.name)}" ${c.code === sel ? 'selected' : ''}>${c.code} ${esc(c.name)}</option>`).join('')}</optgroup>` : '';
+}).join('');
 
 // ---------------------------------------------------------------- 主檔頁
 async function pageMaster(key) {
@@ -175,9 +190,9 @@ async function pageMaster(key) {
   const load = async () => {
     try {
       const { data } = await api(`/${key}${qs({ q: $('#q').value.trim(), active: $('#active').value })}`);
-      $('#list').innerHTML = data.length ? `<table><thead><tr>${m.cols.map(([, l, t]) => `<th class="${t ? 'num' : ''}">${l}</th>`).join('')}<th>狀態</th></tr></thead><tbody>
+      $('#list').innerHTML = data.length ? `<table><thead><tr>${m.cols.map(([, l, t]) => `<th class="${t && typeof t !== 'function' ? 'num' : ''}">${l}</th>`).join('')}<th>狀態</th></tr></thead><tbody>
         ${data.map((r) => `<tr class="clickable ${r.is_active ? '' : 'inactive'}" data-id="${r[m.pk]}">
-          ${m.cols.map(([c, , t]) => `<td class="${t && t !== 'yn' ? 'num' : ''}">${t === 'yn' ? (r[c] ? '是' : '') : t === 'num2' ? esc(fmt(r[c], 2)) : t ? esc(fmt(r[c])) : esc(r[c])}</td>`).join('')}
+          ${m.cols.map(([c, , t]) => (typeof t === 'function' ? `<td>${t(r)}</td>` : `<td class="${t && t !== 'yn' ? 'num' : ''}">${t === 'yn' ? (r[c] ? '是' : '') : t === 'num2' ? esc(fmt(r[c], 2)) : t ? esc(fmt(r[c])) : esc(r[c])}</td>`)).join('')}
           <td>${r.is_active ? '<span class="tag">啟用</span>' : '<span class="tag warn">停用</span>'}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">沒有資料</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => masterForm(key, Number(tr.dataset.id), load));
@@ -197,12 +212,43 @@ function prefRow(p = {}) {
     <td><button type="button" class="link" data-del>刪除</button></td></tr>`;
 }
 
+function sbaRow(codes, a = {}) {
+  return `<tr data-sba="${a.sba_id || ''}">
+    <td><select data-k="bank_code" style="min-width:150px">${bankCodeOpts(codes, a.bank_code)}</select></td>
+    <td><input data-k="branch_name" value="${esc(a.branch_name)}" placeholder="例：中山分行" style="width:110px"></td>
+    <td><span class="inline"><input data-k="account_no" inputmode="numeric" value="${esc(a.account_no)}" placeholder="只填數字" style="width:150px"><button type="button" class="link" data-copyno>複製</button></span></td>
+    <td><input data-k="account_holder" value="${esc(a.account_holder)}" placeholder="戶名" style="width:120px"></td>
+    <td><input type="checkbox" data-k="is_default" ${a.is_default ? 'checked' : ''}></td>
+    <td><input type="checkbox" data-k="is_active" ${a.is_active ? 'checked' : ''}></td>
+    <td><input data-k="note" value="${esc(a.note)}" style="width:100px"></td>
+    <td>${a.used ? `<span class="hint">已付款 ${a.used} 筆</span>` : '<button type="button" class="link" data-del>刪除</button>'}</td></tr>`;
+}
+/** 供應商存檔後，同步匯款帳戶（新增／修改／刪除）；錯誤時告知是哪一列 */
+async function saveSbas(box, supplierId, original) {
+  const rows = $$('#sbas tr', box);
+  const keep = new Set();
+  for (const [i, tr] of rows.entries()) {
+    const v = (k) => { const el = $(`[data-k=${k}]`, tr); return el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value; };
+    const body = { supplier_id: supplierId, bank_code: v('bank_code'), branch_name: v('branch_name'), account_no: v('account_no'), account_holder: v('account_holder'), is_default: v('is_default'), is_active: v('is_active'), note: v('note') };
+    if (!body.bank_code && !body.account_no) continue; // 空白列略過
+    const sid = tr.dataset.sba;
+    try {
+      if (sid) { keep.add(Number(sid)); await api(`/supplier-accounts/${sid}`, { method: 'PUT', body }); }
+      else await api('/supplier-accounts', { method: 'POST', body });
+    } catch (e) { e.message = `匯款帳戶第 ${i + 1} 列：${e.message}`; throw e; }
+  }
+  for (const a of original) if (!keep.has(a.sba_id)) await api(`/supplier-accounts/${a.sba_id}`, { method: 'DELETE' });
+}
+
 async function masterForm(key, id, reload) {
   const m = MASTERS[key];
   try {
     const row = id ? (await api(`/${key}/${id}`)).data : { is_active: 1 };
     const fkData = {};
     for (const [, , type, o] of m.fields) if (type === 'fk') fkData[o.resource] = await lookup(o.resource, true);
+    const needCodes = m.fields.some(([, , type]) => type === 'bankcode') || key === 'suppliers';
+    const codes = needCodes ? await lookup('bank-codes', true) : [];
+    const sbas = key === 'suppliers' && id ? (await api('/supplier-accounts' + qs({ supplier_id: id }))).data : [];
 
     const input = ([name, label, type = 'text', o = {}]) => {
       const v = row[name];
@@ -211,7 +257,10 @@ async function masterForm(key, id, reload) {
       else if (type === 'enum') ctl = `<select name="${name}">${o.noBlank ? '' : '<option value=""></option>'}${o.values.map((x) => `<option ${v === x ? 'selected' : ''}>${x}</option>`).join('')}</select>`;
       else if (type === 'fk') ctl = `<select name="${name}">${options(fkData[o.resource], o.idKey, v, o.blank ? { blank: o.blank } : {})}</select>`;
       else if (type === 'textarea') ctl = `<textarea name="${name}" rows="2">${esc(v)}</textarea>`;
-      else ctl = `<input name="${name}" type="${type === 'number' ? 'number' : type}" ${type === 'number' ? 'step="any" min="0"' : ''} value="${esc(v)}" ${o.required ? 'required' : ''}>`;
+      else if (type === 'bankcode') ctl = `<select name="${name}">${bankCodeOpts(codes, v)}</select>`;
+      else if (type === 'accountno') ctl = `<span class="inline"><input name="${name}" inputmode="numeric" value="${esc(v)}" placeholder="只填數字"><button type="button" class="link" data-copy="${name}">複製</button></span>`;
+      else if (o.hidden) return `<input type="hidden" name="${name}" value="${esc(v)}">`;
+      else ctl = `<input name="${name}" type="${type === 'number' ? 'number' : type}" ${type === 'number' ? 'step="any" min="0"' : ''} value="${esc(v)}" ${o.required ? 'required' : ''} ${o.placeholder ? `placeholder="${esc(o.placeholder)}"` : ''}>`;
       return `<label class="${o.full ? 'full' : ''}">${label}${o.required ? ' *' : ''}${ctl}</label>`;
     };
 
@@ -220,19 +269,51 @@ async function masterForm(key, id, reload) {
       <div class="table-wrap"><table class="items"><thead><tr><th>烘焙度</th><th>偏好風味</th><th>研磨度</th><th>沖煮器具</th><th>常買品項</th><th>不喜歡</th><th>備註</th><th></th></tr></thead>
       <tbody id="prefs">${(row.preferences || []).map(prefRow).join('')}</tbody></table></div>` : '';
 
+    const sbaSection = key === 'suppliers' ? `
+      <div class="section-title">匯款帳戶 <button type="button" id="addSba">＋ 新增帳戶</button></div>
+      <div class="table-wrap"><table class="items"><thead><tr><th>銀行代號</th><th>分行</th><th>帳號</th><th>戶名</th><th>預設</th><th>啟用</th><th>備註</th><th></th></tr></thead>
+      <tbody id="sbas">${sbas.map((a) => sbaRow(codes, a)).join('')}</tbody></table></div>
+      <p class="hint">一家供應商可有多個帳戶；付款時會先帶出「預設」帳戶。已用於付款的帳戶不能刪除，請取消「啟用」。</p>` : '';
+
     const box = openModal(`
       <h2>${id ? '編輯' : '新增'}${m.title}</h2>
       <form id="f">
         <div class="form-grid">${m.fields.map(input).join('')}
           <label>狀態<select name="is_active"><option value="1" ${row.is_active ? 'selected' : ''}>啟用</option><option value="0" ${row.is_active ? '' : 'selected'}>停用</option></select></label>
-        </div>${m.hint ? `<p class="hint">${m.hint}</p>` : ''}${prefs}
+        </div>${m.hint ? `<p class="hint">${m.hint}</p>` : ''}${prefs}${sbaSection}
         <div class="form-actions">
           ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
           <button type="button" id="cancel">取消</button><button class="primary">存檔</button>
         </div>
-      </form>`, key === 'customers');
+      </form>`, key === 'customers' || key === 'suppliers');
 
     $('#cancel', box).onclick = closeModal;
+    const f0 = $('#f', box);
+    $$('[data-copy]', box).forEach((b) => b.onclick = () => { const v = f0[b.dataset.copy].value.replace(/\D/g, ''); if (v) copyText(v); });
+    if (key === 'bank-accounts') {
+      // 選銀行、填帳號後自動帶出銀行名稱與顯示名稱
+      const autoName = () => {
+        const opt = f0.bank_code.selectedOptions[0];
+        f0.bank_name.value = opt?.dataset.name || f0.bank_name.value;
+        const no = f0.account_no.value.replace(/\D/g, '');
+        const short = (opt?.dataset.name || '').replace(/(商業|國際|儲蓄|股份有限公司|（.*?）|\(.*?\))/g, '').replace(/銀行$/, '');
+        if (opt?.value && (!f0.account_name.value || f0.account_name.dataset.auto === '1')) {
+          f0.account_name.value = `${short}${no ? ' ' + no.slice(-4) : ''}`;
+          f0.account_name.dataset.auto = '1';
+        }
+      };
+      f0.bank_code.onchange = autoName;
+      f0.account_no.addEventListener('input', autoName);
+      f0.account_name.addEventListener('input', () => { f0.account_name.dataset.auto = '0'; });
+    }
+    if (key === 'suppliers') {
+      $('#addSba', box).onclick = () => $('#sbas', box).insertAdjacentHTML('beforeend', sbaRow(codes, { is_active: 1, is_default: $$('#sbas tr', box).length ? 0 : 1 }));
+      $('#sbas', box).addEventListener('click', (e) => {
+        if (e.target.matches('[data-del]')) e.target.closest('tr').remove();
+        if (e.target.matches('[data-copyno]')) { const v = $('[data-k=account_no]', e.target.closest('tr')).value.replace(/\D/g, ''); if (v) copyText(v); }
+        if (e.target.matches('[data-k=is_default]')) $$('#sbas [data-k=is_default]', box).forEach((x) => { if (x !== e.target) x.checked = false; });
+      });
+    }
     if (key === 'customers') {
       $('#addPref', box).onclick = () => $('#prefs', box).insertAdjacentHTML('beforeend', prefRow());
       $('#prefs', box).onclick = (e) => e.target.matches('[data-del]') && e.target.closest('tr').remove();
@@ -244,7 +325,8 @@ async function masterForm(key, id, reload) {
         body.preferences = $$('#prefs tr', box).map((tr) => Object.fromEntries($$('[data-k]', tr).map((el) => [el.dataset.k, el.value])));
       }
       try {
-        await api(id ? `/${key}/${id}` : `/${key}`, { method: id ? 'PUT' : 'POST', body });
+        const res = await api(id ? `/${key}/${id}` : `/${key}`, { method: id ? 'PUT' : 'POST', body });
+        if (key === 'suppliers') await saveSbas(box, res.data.supplier_id, sbas);
         delete cache[key];
         closeModal(); toast('已存檔'); reload();
       } catch (err) { fail(err); }
@@ -1140,6 +1222,10 @@ async function txnForm(direction, id, reload, preset = {}) {
           <label>${isIn ? '客戶' : '供應商'}<select name="${partyKey}">${options(parties, partyKey, t[partyKey], { blank: isIn ? '（不指定／散客）' : '（不指定）' })}</select></label>
           <label>交易對象（自由填寫）<input name="counterparty" value="${esc(t.counterparty)}" placeholder="選了${isIn ? '客戶' : '供應商'}可留空"></label>
           <label>銀行交易序號<input name="bank_ref_no" value="${esc(t.bank_ref_no)}"></label>
+          ${isIn ? '' : `<label>匯費（另記一筆手續費）<input name="fee" type="number" step="any" min="0" value="${esc(t.fee_amount ?? '')}" placeholder="0" ${t.fee_reconciled ? 'title="匯費已對帳"' : ''}></label>
+          <label class="full">收款帳戶<span class="inline"><select name="payee_account_id" style="flex:1"><option value="">（先選供應商）</option></select><button type="button" class="link" id="copyPayee">複製帳號</button></span></label>
+          <div class="full hint" id="payeeInfo">${t.payee_info ? '本筆紀錄：' + esc(t.payee_info) : ''}</div>`}
+          ${t.fee_parent_no ? `<div class="full hint">這筆是 ${esc(t.fee_parent_no)} 的匯費，修改付款時會一起更新。</div>` : ''}
           <label class="full">摘要<input name="description" value="${esc(t.description)}"></label>
         </div>
         <div class="section-title">沖銷${isIn ? '銷貨單' : '進貨單／費用'} <span class="hint" id="docHint"></span></div>
@@ -1196,9 +1282,30 @@ async function txnForm(direction, id, reload, preset = {}) {
       calc();
     });
     f.amount.oninput = calc;
-    f[partyKey].onchange = loadDocs;
+    // 付款：依供應商帶出匯款帳戶（預設帳戶先選好）
+    let payees = [];
+    const loadPayees = async (keepSel) => {
+      if (isIn) return;
+      const sid = f.supplier_id.value;
+      payees = sid ? (await api('/supplier-accounts' + qs({ supplier_id: sid }))).data.filter((a) => a.is_active || a.sba_id === t.payee_account_id) : [];
+      const sel = keepSel ?? (payees.find((a) => a.is_default) || payees[0])?.sba_id ?? '';
+      f.payee_account_id.innerHTML = `<option value="">${sid ? (payees.length ? '（不指定）' : '（這家供應商還沒有匯款帳戶，可到主檔新增）') : '（先選供應商）'}</option>`
+        + payees.map((a) => `<option value="${a.sba_id}" ${a.sba_id === Number(sel) ? 'selected' : ''}>${esc(a.label)}${a.is_default ? '（預設）' : ''}</option>`).join('');
+      showPayee();
+    };
+    const showPayee = () => {
+      if (isIn) return;
+      const a = payees.find((x) => x.sba_id === Number(f.payee_account_id.value));
+      $('#payeeInfo', box).innerHTML = a ? `匯款：<b>${esc(a.bank_code)} ${esc(a.bank_name || '')}</b>　${esc(a.branch_name || '')}　戶名 <b>${esc(a.account_holder || '—')}</b>　帳號 <b>${esc(fmtAcctNo(a.account_no))}</b>`
+        : (t.payee_info ? '本筆紀錄：' + esc(t.payee_info) : '');
+    };
+    if (!isIn) {
+      f.payee_account_id.onchange = showPayee;
+      $('#copyPayee', box).onclick = () => { const a = payees.find((x) => x.sba_id === Number(f.payee_account_id.value)); if (a) copyText(a.account_no); else toast('請先選收款帳戶', true); };
+    }
+    f[partyKey].onchange = () => { loadDocs(); loadPayees(); };
     $('#cancel', box).onclick = closeModal;
-    await loadDocs();
+    await Promise.all([loadDocs(), loadPayees(t.payee_account_id ?? (id ? '' : undefined))]);
 
     f.onsubmit = async (e) => {
       e.preventDefault();
@@ -1988,7 +2095,7 @@ const ROUTE_RES = {
   roasts: 'roast-batches', 'stock-beans': 'inventory', 'stock-roasted': 'inventory', 'stock-packaging': 'inventory', 'stock-counts': 'stock-counts', 'opening-stock': 'opening-stock',
   bank: 'bank-transactions', expenses: 'expenses', receivables: 'finance', payables: 'finance', 'expense-summary': 'finance', reconcile: 'reconcile',
   recipes: 'recipes', 'rpt-profit': 'reports', 'rpt-pnl': 'reports', 'rpt-loss': 'reports', 'rpt-trace': 'reports', 'rpt-stock': 'inventory', 'rpt-processing': 'reports',
-  users: 'users', audit: 'audit-logs', data: 'backup',
+  users: 'users', audit: 'audit-logs', data: 'backup', 'bank-codes': 'bank-codes',
 };
 const canRead = (routeKey) => {
   if (!ME) return true;
@@ -2296,6 +2403,60 @@ async function pageProcessing() {
   };
   $('#search').onclick = load;
   load();
+}
+
+// ---------------------------------------------------------------- 銀行代碼
+async function pageBankCodes() {
+  $('#main').innerHTML = `
+    <h2>銀行代碼</h2>
+    <div class="toolbar">
+      <label>搜尋<input id="q" placeholder="代號或名稱"></label>
+      <label>類別<select id="cat"><option value="">全部</option>${plainOpts(['本國銀行', '郵局', '外商銀行', '信用合作社', '農漁會', '其他'])}</select></label>
+      <label>狀態<select id="active"><option value="">全部</option><option value="1">啟用中</option><option value="0">已停用</option></select></label>
+      <button id="search">查詢</button><span class="spacer"></span>
+      <button id="restore">補回內建代號</button><button id="add" class="primary">＋ 新增代號</button>
+    </div>
+    <p class="hint">跨行匯款用的 3 碼銀行（總機構）代號，已內建本國銀行、郵局、外商銀行、信用合作社與農漁會資訊中心。銀行合併、更名時可直接修改名稱或停用；個別農漁會、找不到的機構請自行新增。
+      內建代號不能刪除；已有帳戶使用的代號也不能刪除，請改停用。分行代號（4 碼）在各帳戶上自行填寫。</p>
+    <div class="card"><div class="table-wrap" id="list"></div></div>`;
+  const load = async () => {
+    try {
+      const { data } = await api('/bank-codes' + qs({ q: $('#q').value.trim(), category: $('#cat').value, active: $('#active').value }));
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th>代號</th><th>名稱</th><th>類別</th><th class="num">使用帳戶</th><th>來源</th><th>狀態</th><th>備註</th></tr></thead><tbody>
+        ${data.map((c) => `<tr class="clickable ${c.is_active ? '' : 'inactive'}" data-code="${c.code}"><td><b>${c.code}</b></td><td>${esc(c.name)}</td><td>${esc(c.category)}</td><td class="num">${c.used || ''}</td>
+          <td>${c.is_builtin ? '內建' : '自訂'}</td><td>${c.is_active ? '<span class="tag">啟用</span>' : '<span class="tag warn">停用</span>'}</td><td>${esc(c.note)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">沒有資料</div>';
+      $$('#list tr.clickable').forEach((tr) => tr.onclick = () => bankCodeForm(data.find((c) => c.code === tr.dataset.code), load));
+    } catch (e) { fail(e); }
+  };
+  $('#search').onclick = load;
+  $('#q').onkeydown = (e) => e.key === 'Enter' && load();
+  $('#cat').onchange = load; $('#active').onchange = load;
+  $('#add').onclick = () => bankCodeForm(null, load);
+  $('#restore').onclick = async () => { try { const r = await api('/bank-codes/restore', { method: 'POST' }); toast(r.inserted ? `已補回 ${r.inserted} 個內建代號` : '內建代號都在，不需要補'); delete cache['bank-codes']; load(); } catch (e) { fail(e); } };
+  load();
+}
+function bankCodeForm(c, reload) {
+  const x = c || { category: '本國銀行', is_active: 1 };
+  const box = openModal(`
+    <h2>${c ? `銀行代號 ${esc(c.code)}` : '新增銀行代號'}</h2>
+    <form id="f"><div class="form-grid">
+      <label>代號（3 碼）*<input name="code" required pattern="\\d{3}" maxlength="3" inputmode="numeric" value="${esc(x.code)}" ${c ? 'disabled' : ''}></label>
+      <label>名稱 *<input name="name" required value="${esc(x.name)}"></label>
+      <label>類別<select name="category">${plainOpts(['本國銀行', '郵局', '外商銀行', '信用合作社', '農漁會', '其他'], x.category)}</select></label>
+      <label>狀態<select name="is_active"><option value="1" ${x.is_active ? 'selected' : ''}>啟用</option><option value="0" ${x.is_active ? '' : 'selected'}>停用</option></select></label>
+      <label class="full">備註<input name="note" value="${esc(x.note)}" placeholder="例：2024 年併入某銀行"></label>
+    </div>
+    <div class="form-actions">${c && !c.is_builtin ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span><button type="button" id="cancel">取消</button><button class="primary">存檔</button></div></form>`);
+  const f = $('#f', box);
+  $('#cancel', box).onclick = closeModal;
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api(c ? `/bank-codes/${c.code}` : '/bank-codes', { method: c ? 'PUT' : 'POST', body: Object.fromEntries(new FormData(f)) }); delete cache['bank-codes']; closeModal(); toast('已存檔'); reload(); } catch (err) { fail(err); }
+  };
+  if ($('#del', box)) $('#del', box).onclick = async () => {
+    if (!confirm(`刪除代號 ${c.code}？`)) return;
+    try { await api(`/bank-codes/${c.code}`, { method: 'DELETE' }); delete cache['bank-codes']; closeModal(); toast('已刪除'); reload(); } catch (err) { fail(err); }
+  };
 }
 
 // ---------------------------------------------------------------- 銀行對帳
@@ -2840,6 +3001,7 @@ const ROUTES = {
   'stock-roasted': pageStockRoasted,
   'stock-packaging': pageStockPackaging,
   reconcile: pageReconcile,
+  'bank-codes': pageBankCodes,
   'rpt-profit': pageProfit,
   'rpt-pnl': pagePnl,
   'rpt-loss': pageLoss,

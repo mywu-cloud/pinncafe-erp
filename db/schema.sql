@@ -400,13 +400,30 @@ CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
 -- 2.8 銀行帳戶（現金、LINE Pay、刷卡收單也各建一個帳戶）
 --   帳戶餘額 = opening_balance + Σ入帳 − Σ出帳（txn_date 不可早於 opening_date）
 -- -------------------------------------------------------------
+-- 金融機構代號（3 碼總機構代號；內建清單由 API 第一次讀取時自動寫入，可自行新增修改）
+CREATE TABLE IF NOT EXISTS bank_codes (
+  code        TEXT    PRIMARY KEY CHECK (length(code) = 3),
+  name        TEXT    NOT NULL,
+  category    TEXT    NOT NULL DEFAULT '本國銀行' CHECK (category IN ('本國銀行','外商銀行','郵局','信用合作社','農漁會','其他')),
+  is_builtin  INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0,1)),
+  is_active   INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  note        TEXT,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at  TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
 CREATE TABLE IF NOT EXISTS bank_accounts (
   account_id        INTEGER PRIMARY KEY AUTOINCREMENT,
   account_name      TEXT    NOT NULL,
   account_type      TEXT    NOT NULL DEFAULT '銀行'
                     CHECK (account_type IN ('銀行','現金','LINE Pay','信用卡收單','電商平台')),
   bank_name         TEXT,
-  account_no_masked TEXT,                             -- 帳號末四碼（不存完整帳號）
+  account_no_masked TEXT,                             -- 帳號末四碼（清單顯示用，由 account_no 自動產生）
+  bank_code         TEXT,                             -- 3 碼銀行代號（bank_codes）
+  branch_name       TEXT,                             -- 分行名稱
+  branch_code       TEXT,                             -- 4 碼分行代號（選填）
+  account_no        TEXT,                             -- 完整帳號（只存數字）
+  account_holder    TEXT,                             -- 戶名
   opening_balance   REAL    NOT NULL DEFAULT 0,
   opening_date      TEXT,
   note              TEXT,
@@ -420,6 +437,23 @@ CREATE TABLE IF NOT EXISTS bank_accounts (
 --   txn_no：自動產生 T{YYYYMMDD}-{NN}
 --   帳戶互轉：一筆出帳＋一筆入帳，transfer_txn_id 互相指向
 -- -------------------------------------------------------------
+-- 供應商匯款帳戶（一家可多個，一個預設）
+CREATE TABLE IF NOT EXISTS supplier_bank_accounts (
+  sba_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  supplier_id     INTEGER NOT NULL REFERENCES suppliers(supplier_id),
+  bank_code       TEXT    NOT NULL,
+  branch_name     TEXT,
+  branch_code     TEXT,
+  account_no      TEXT    NOT NULL,
+  account_holder  TEXT,
+  is_default      INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0,1)),
+  is_active       INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+  note            TEXT,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_sba_supplier ON supplier_bank_accounts(supplier_id);
+
 CREATE TABLE IF NOT EXISTS bank_transactions (
   txn_id          INTEGER PRIMARY KEY AUTOINCREMENT,
   txn_no          TEXT    NOT NULL UNIQUE,
@@ -435,6 +469,9 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
   transfer_txn_id INTEGER,                            -- 帳戶互轉的另一筆
   reconciled      INTEGER NOT NULL DEFAULT 0 CHECK (reconciled IN (0,1)),   -- Phase 5 對帳
   bank_ref_no     TEXT,
+  payee_account_id INTEGER REFERENCES supplier_bank_accounts(sba_id),  -- 付款給供應商的收款帳戶
+  payee_info      TEXT,                               -- 付款當時的收款帳戶資料（銀行代號、分行、戶名、帳號）
+  fee_txn_id      INTEGER,                            -- 這筆付款的匯費（另一筆「手續費」出帳）
   created_by      TEXT,
   created_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours')),
   updated_at      TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))

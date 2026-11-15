@@ -76,6 +76,8 @@ tr.total td { font-weight: 700; background: #faf7f2; }
 .form-grid input.up { color: var(--up); } .form-grid input.down { color: var(--down); }
 .nav-group { padding: 10px 18px 3px; }
 .nav a { padding: 6px 18px; }
+.inline { display: flex; gap: 6px; align-items: center; }
+.inline > input, .inline > select { flex: 1; min-width: 0; }
 pre.json { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; max-height: 260px; overflow: auto; }
 .nav a[hidden], .nav-group[hidden] { display: none; }
 @media (max-width: 760px) {
