@@ -4,6 +4,7 @@
 -- =============================================================
 DELETE FROM bank_statement_lines;
 DELETE FROM bank_import_profiles;
+DELETE FROM bank_statement_openings;
 DELETE FROM audit_logs;
 DELETE FROM stock_count_items;
 DELETE FROM stock_counts;
@@ -24,11 +25,11 @@ DELETE FROM green_bean_lots;
 DELETE FROM purchase_items;
 DELETE FROM purchases;
 DELETE FROM doc_sequences;
+DELETE FROM subscriptions;
 DELETE FROM customer_preferences;
 DELETE FROM customers;
 DELETE FROM product_recipes;
 UPDATE sales SET subscription_id = NULL;
-DELETE FROM subscriptions;
 DELETE FROM products;
 DELETE FROM roasted_beans;
 DELETE FROM packaging_items;

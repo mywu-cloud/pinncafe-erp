@@ -174,7 +174,7 @@ npm run db:remote:migrate:phase3    # Phase 3：依沖帳重算收付款狀態�
 
 Phase 4 升級：先 `npm run db:remote:migrate:phase4`（加兩個欄位，只能跑一次），再 `npm run db:remote:schema`。
 
-Phase 5 升級：只要 `npm run db:remote:schema`（新增四張表）。**要在部署新版之前跑**，否則登入時會找不到 users 表。
+Phase 5 升級：只要 `npm run db:remote:schema`（新增五張表）。**要在部署新版之前跑**，否則登入時會找不到 users 表。
 
 每個 migration 只能跑一次。
 
@@ -196,7 +196,7 @@ Phase 5 升級：只要 `npm run db:remote:schema`（新增四張表）。**要�
 
 1. 第一次登入的人自動成為管理者（MY）。要讓員工使用：「系統 → 使用者」新增 email 與角色，**並到 Cloudflare Zero Trust → Access 把該 email 加進允許名單**
 2. 費用勾選「攤入烘焙」後，「報表 → 加工成本」會算出每月每 kg 加工成本，「毛利分析」顯示扣掉加工成本後的調整後毛利
-3. 「財務 → 銀行對帳」選帳戶 → 匯入網銀下載的 CSV（第一次設定欄位對應）→ 確認建議配對；對帳單有、系統沒有的直接建立收支
+3. 「財務 → 銀行對帳」選帳戶 → 匯入網銀下載的 CSV（第一次設定欄位對應）→ 確認建議配對；對帳單有、系統沒有的直接建立收支。沒有 CSV 可「手動輸入明細」照存摺登打；「期初設定」可改帳戶期初、設定對帳起點（存摺餘額），系統會逐日檢查存摺餘額是否連續
 4. 每個查詢頁右上角「匯出 Excel」；「系統 → 匯入／備份」可下載主檔範本批次匯入，管理者可下載全部資料備份
 
 ### Phase 2 升級後的設定

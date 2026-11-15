@@ -689,6 +689,16 @@ CREATE TABLE IF NOT EXISTS bank_import_profiles (
   updated_at TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
 );
 
+-- 對帳起點（每個帳戶一筆）：對帳單（存摺）在 open_date 當天結束時的餘額；之後的對帳單明細從這裡逐日核對餘額是否連續
+CREATE TABLE IF NOT EXISTS bank_statement_openings (
+  account_id    INTEGER PRIMARY KEY REFERENCES bank_accounts(account_id),
+  open_date     TEXT    NOT NULL,
+  open_balance  REAL    NOT NULL,
+  note          TEXT,
+  updated_by    TEXT,
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
 CREATE TABLE IF NOT EXISTS bank_statement_lines (
   line_id        INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id     INTEGER NOT NULL REFERENCES bank_accounts(account_id),

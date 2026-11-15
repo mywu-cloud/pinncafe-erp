@@ -2348,10 +2348,13 @@ async function pageReconcile() {
       <label>起日<input type="date" id="from" value="${monthStart()}"></label>
       <label>迄日<input type="date" id="to" value="${today()}"></label>
       <button id="search">查詢</button><span class="spacer"></span>
+      <button id="openingBtn">期初設定</button>
+      <button id="addLine">＋ 手動輸入明細</button>
       <button id="upload" class="primary">⬆ 匯入對帳單 CSV</button><input type="file" id="file" accept=".csv,.txt,.tsv" hidden>
     </div>
     <p class="hint">從網銀下載交易明細 CSV 匯入（支援 UTF-8 與 Big5、民國年日期），第一次匯入時設定欄位對應，之後同一帳戶會自動套用。系統會依「同方向、同金額、日期相差 5 天內」建議配對，確認後兩邊都標記已對帳；
-      已對帳的收支不能再改金額、日期或刪除。對帳單上有、系統沒有的明細可直接「建立收支」。現金等沒有對帳單的帳戶，可在右側直接「標記已核對」。</p>
+      已對帳的收支不能再改金額、日期或刪除。對帳單上有、系統沒有的明細可直接「建立收支」。現金等沒有對帳單的帳戶，可在右側直接「標記已核對」。
+      沒有 CSV 時可「手動輸入明細」照存摺逐筆登打（餘額必填）。「期初設定」可改帳戶期初（系統餘額起點）和對帳起點（存摺某日的餘額），系統會逐日檢查存摺餘額是否連續，不連續代表可能漏登。</p>
     <div class="stats" id="stats"></div>
     <div id="work"></div>`;
   const loadOverview = async () => {
@@ -2365,15 +2368,26 @@ async function pageReconcile() {
     loadOverview().catch(() => {});
     const aid = $('#acc').value;
     if (!aid) { $('#work').innerHTML = '<div class="empty">請選擇帳戶</div>'; $('#stats').innerHTML = ''; return; }
+    lastData = null;
     try {
       const d = await api(`/reconcile/${aid}` + qs({ from: $('#from').value, to: $('#to').value }));
+      lastData = d;
       const sug = new Map(d.suggestions.map((s) => [s.line_id, s.txn_id]));
       const txnById = new Map(d.txns.map((t) => [t.txn_id, t]));
       const sugTxn = new Set(d.suggestions.map((s) => s.txn_id));
       $('#stats').innerHTML = statCards([['對帳單筆數', fmt(d.summary.lines)], ['已對帳', fmt(d.summary.matched), 'up'], ['待對帳', fmt(d.summary.open_lines), d.summary.open_lines ? 'down' : ''], ['系統未核收支', fmt(d.summary.open_txns)],
         ...(d.check ? [[`餘額核對（${d.check.date}）`, `對帳單 ${money(d.check.statement_balance)}／系統 ${money(d.check.system_balance)}${d.check.diff ? `<br><span class="down">差 ${money(d.check.diff)}</span>` : ' ✓'}`]] : [])]);
       const amt = (dir, a) => (dir === DIR_IN ? `<span class="up">+${money(a)}</span>` : `<span class="down">−${money(a)}</span>`);
+      const acc = d.account;
+      const oc = d.opening_check;
       $('#work').innerHTML = `
+        <div class="card"><div class="form-grid" style="margin:0">
+          <div><div class="hint">帳戶期初（系統餘額起點）</div><b>${acc.opening_date ? esc(acc.opening_date) : '未設定日期'}　${money(acc.opening_balance)}</b></div>
+          <div><div class="hint">對帳起點（存摺餘額）</div><b>${d.opening ? `${esc(d.opening.open_date)}　${money(d.opening.open_balance)}` : '未設定'}</b>
+            ${oc ? (oc.diff ? `<div class="down">與系統同日餘額 ${money(oc.system_balance)} 差 ${money(oc.diff)}</div>` : '<div class="up">與系統同日餘額相符 ✓</div>') : ''}</div>
+          <div><div class="hint">存摺餘額連續性</div><b>${d.all_breaks ? `<span class="down">${d.all_breaks} 天不連續</span>` : d.lines.some((l) => l.day_ok !== null) ? '<span class="up">連續 ✓</span>' : '—'}</b></div>
+        </div>
+        ${d.breaks.length ? `<p class="hint down">${d.breaks.map((x) => `${esc(x.date)}：依前一日餘額推算應為 ${money(x.expected)}，存摺為 ${money(x.statement)}（差 ${money(x.diff)}）`).join('<br>')}<br>可能漏登明細或餘額抄錯，請補登或修改。</p>` : ''}</div>
         <div class="section-title">對帳單明細 ${d.suggestions.length ? `<button type="button" id="acceptAll" class="primary">確認 ${d.suggestions.length} 筆建議配對</button>` : ''}</div>
         <div class="card"><div class="table-wrap">${d.lines.length ? `<table><thead><tr><th>日期</th><th>摘要</th><th>序號</th><th class="num">金額</th><th class="num">對帳單餘額</th><th>狀態／配對</th><th></th></tr></thead><tbody>
           ${d.lines.map((l) => {
@@ -2383,7 +2397,8 @@ async function pageReconcile() {
             const act = l.status === '已對帳' ? `<button type="button" class="link" data-unmatch="${l.line_id}">取消配對</button>`
               : l.status === '忽略' ? `<button type="button" class="link" data-unignore="${l.line_id}">取消忽略</button>`
               : `${s ? `<button type="button" class="link" data-accept="${l.line_id}">確認</button>　` : ''}<button type="button" class="link" data-pick="${l.line_id}">手動配對</button>　<button type="button" class="link" data-create="${l.line_id}">建立收支</button>　<button type="button" class="link" data-ignore="${l.line_id}">忽略</button>`;
-            return `<tr><td>${esc(l.txn_date)}</td><td>${esc(l.description)}</td><td>${esc(l.ref_no)}</td><td class="num">${amt(l.direction, l.amount)}</td><td class="num">${l.balance === null ? '' : money(l.balance)}</td><td>${st}</td><td>${act}</td></tr>`;
+            const balTag = l.day_ok === false ? ` <span class="tag warn" title="依前一日餘額推算當日應為 ${money(l.day_expected)}">不連續</span>` : '';
+            return `<tr><td>${esc(l.txn_date)}${l.before_opening ? ' <span class="hint">起點前</span>' : ''}</td><td>${esc(l.description)}${l.import_batch === '手動輸入' ? ' <span class="hint">手動</span>' : ''}</td><td>${esc(l.ref_no)}</td><td class="num">${amt(l.direction, l.amount)}</td><td class="num">${l.balance === null ? '' : money(l.balance)}${balTag}</td><td>${st}</td><td><button type="button" class="link" data-edit="${l.line_id}">修改</button>　${act}</td></tr>`;
           }).join('')}</tbody></table>` : '<div class="empty">這段期間還沒有匯入對帳單</div>'}</div></div>
         <div class="section-title">系統收支（未核對） ${d.txns.filter((t) => !t.reconciled).length ? '<button type="button" id="markAll">全部標記已核對</button>' : ''}</div>
         <div class="card"><div class="table-wrap">${d.txns.length ? `<table><thead><tr><th>日期</th><th>編號</th><th>類別</th><th>對象／摘要</th><th class="num">金額</th><th>狀態</th><th></th></tr></thead><tbody>
@@ -2413,14 +2428,18 @@ async function pageReconcile() {
         const l = d.lines.find((x) => x.line_id === Number(b.dataset.create));
         txnForm(l.direction, null, load, { account_id: Number(aid), txn_date: l.txn_date, amount: l.amount, description: l.description, bank_ref_no: l.ref_no, category: l.direction === DIR_IN ? '其他' : '其他' });
       });
+      $$('[data-edit]').forEach((b) => b.onclick = () => stmtLineForm(Number(aid), d.lines.find((x) => x.line_id === Number(b.dataset.edit)), load));
       if ($('#delOpen')) $('#delOpen').onclick = async () => {
         if (!confirm('刪除這個帳戶所有「未對帳／忽略」的對帳單明細？（已對帳的不會刪）')) return;
         try { const r = await api(`/reconcile/${aid}/lines`, { method: 'DELETE' }); toast(`已刪除 ${r.deleted} 筆`); load(); } catch (e) { fail(e); }
       };
     } catch (e) { fail(e); }
   };
+  let lastData = null;
   $('#search').onclick = load;
   $('#acc').onchange = load;
+  $('#addLine').onclick = () => { if (!$('#acc').value) return toast('請先選擇帳戶', true); stmtLineForm(Number($('#acc').value), null, load); };
+  $('#openingBtn').onclick = () => { if (!$('#acc').value) return toast('請先選擇帳戶', true); bankOpeningForm(Number($("#acc").value), lastData, load); };
   $('#upload').onclick = () => { if (!$('#acc').value) return toast('請先選擇帳戶', true); $('#file').click(); };
   $('#file').onchange = async () => {
     const file = $('#file').files[0];
@@ -2429,6 +2448,102 @@ async function pageReconcile() {
     try { csvMappingForm(Number($('#acc').value), parseCsv(await readTextFile(file)), file.name, load); } catch (e) { fail(e); }
   };
   load();
+}
+
+/** 手動輸入／修改對帳單明細 */
+function stmtLineForm(aid, l, reload) {
+  const x = l || { txn_date: today(), direction: DIR_IN };
+  const locked = l?.status === '已對帳';
+  const needBal = !l || l.import_batch === '手動輸入' || l.balance !== null;
+  const dis = locked ? 'disabled' : '';
+  const box = openModal(`
+    <h2>${l ? '修改對帳單明細' : '手動輸入對帳單明細'}</h2>
+    ${locked ? `<div class="notice">已對帳（${esc(l.matched_txn_no || '')}），只能改摘要、序號、餘額；要改日期或金額請先「取消配對」。</div>` : ''}
+    <form id="f"><div class="form-grid">
+      <label>日期 *<input type="date" name="txn_date" required value="${esc(x.txn_date)}" ${dis}></label>
+      <label>存入／支出 *<select name="direction" ${dis}><option value="${DIR_IN}" ${x.direction === DIR_IN ? 'selected' : ''}>存入（入帳）</option><option value="${DIR_OUT}" ${x.direction === DIR_OUT ? 'selected' : ''}>支出（出帳）</option></select></label>
+      <label>金額 *<input type="number" name="amount" step="0.01" min="0.01" required value="${esc(x.amount ?? '')}" ${dis}></label>
+      <label>存摺餘額${needBal ? ' *' : ''}<input type="number" name="balance" step="0.01" ${needBal ? 'required' : ''} value="${esc(x.balance ?? '')}"></label>
+      <label>摘要<input name="description" value="${esc(x.description)}"></label>
+      <label>交易序號<input name="ref_no" value="${esc(x.ref_no)}"></label>
+    </div>
+    <p class="hint" id="balHint"></p>
+    <div class="form-actions">${l && !locked ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span><button type="button" id="cancel">取消</button>
+      ${l ? '' : '<button type="button" id="saveNext">存檔並繼續輸入</button>'}<button class="primary">存檔</button></div></form>`);
+  const f = $('#f', box);
+  $('#cancel', box).onclick = closeModal;
+  const body = () => ({ ...Object.fromEntries(new FormData(f)), ...(l ? { line_id: l.line_id } : {}), ...(locked ? {} : {}) });
+  const save = async (next) => {
+    if (!f.reportValidity()) return;
+    try {
+      await api(`/reconcile/${aid}/lines`, { method: l ? 'PUT' : 'POST', body: body() });
+      toast('已存檔'); reload();
+      if (next) { // 保留日期，下一筆的餘額從這筆推算
+        const bal = Number(f.balance.value);
+        f.amount.value = ''; f.description.value = ''; f.ref_no.value = ''; f.balance.value = '';
+        $('#balHint', box).textContent = `上一筆存摺餘額 ${money(bal)}`;
+        f.dataset.prev = bal;
+        f.amount.focus();
+      } else closeModal();
+    } catch (e) { fail(e); }
+  };
+  // 輸入金額時，依上一筆餘額提示本筆應有餘額
+  const hint = () => {
+    if (!f.dataset.prev || !f.amount.value) return;
+    const exp = Number(f.dataset.prev) + (f.direction.value === DIR_IN ? 1 : -1) * Number(f.amount.value);
+    $('#balHint', box).textContent = `上一筆存摺餘額 ${money(Number(f.dataset.prev))}，依此推算本筆餘額 ${money(exp)}`;
+    if (!f.balance.value) f.balance.placeholder = r2(exp);
+  };
+  f.amount.oninput = hint; f.direction.onchange = hint;
+  f.onsubmit = (e) => { e.preventDefault(); save(false); };
+  if ($('#saveNext', box)) $('#saveNext', box).onclick = () => save(true);
+  if ($('#del', box)) $('#del', box).onclick = async () => {
+    if (!confirm('刪除這筆對帳單明細？')) return;
+    try { await api(`/reconcile/${aid}/lines?line_id=${l.line_id}`, { method: 'DELETE' }); closeModal(); toast('已刪除'); reload(); } catch (e) { fail(e); }
+  };
+}
+
+/** 期初設定：帳戶期初（系統）＋ 對帳起點（存摺） */
+async function bankOpeningForm(aid, d, reload) {
+  try {
+    const acc = d?.account || (await api(`/reconcile/${aid}` + qs({ from: today(), to: today() }))).account;
+    const op = (await api(`/reconcile/${aid}/opening`)).data;
+    const box = openModal(`
+      <h2>期初設定：${esc(acc.account_name)}</h2>
+      <form id="fa">
+        <div class="section-title">帳戶期初（系統餘額起點）</div>
+        <p class="hint">與「主檔 → 銀行帳戶」的期初餘額、期初日期是同一組資料。系統帳戶餘額 = 期初餘額 ＋ 期初日之後的收支；期初日期不能晚於最早一筆收支。</p>
+        <div class="form-grid">
+          <label>期初日期<input type="date" name="opening_date" value="${esc(acc.opening_date || '')}"></label>
+          <label>期初餘額 *<input type="number" step="0.01" min="0" name="opening_balance" required value="${esc(acc.opening_balance ?? 0)}"></label>
+        </div>
+        <div class="form-actions"><span class="spacer"></span><button class="primary">儲存帳戶期初</button></div>
+      </form>
+      <form id="fs">
+        <div class="section-title">對帳起點（存摺餘額）</div>
+        <p class="hint">開始對帳那天「結束時」存摺上的餘額。之後的對帳單明細會從這裡逐日檢查餘額是否連續；系統也會比對同一天的系統餘額，有差額代表起點之前還有收支沒登錄或沒對清。</p>
+        <div class="form-grid">
+          <label>起點日期 *<input type="date" name="open_date" required value="${esc(op?.open_date || acc.opening_date || '')}"></label>
+          <label>當日存摺餘額 *<input type="number" step="0.01" name="open_balance" required value="${esc(op?.open_balance ?? '')}"></label>
+          <label class="full">備註<input name="note" value="${esc(op?.note || '')}"></label>
+        </div>
+        ${op ? `<p class="hint">最後修改：${esc(op.updated_at)} ${esc(op.updated_by || '')}</p>` : ''}
+        <div class="form-actions">${op ? '<button type="button" class="danger" id="delOp">清除對帳起點</button>' : ''}<span class="spacer"></span><button type="button" id="cancel">關閉</button><button class="primary">儲存對帳起點</button></div>
+      </form>`);
+    $('#cancel', box).onclick = closeModal;
+    $('#fa', box).onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api(`/reconcile/${aid}/account-opening`, { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) }); delete cache['bank-accounts']; toast('帳戶期初已儲存'); reload(); } catch (err) { fail(err); }
+    };
+    $('#fs', box).onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api(`/reconcile/${aid}/opening`, { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) }); closeModal(); toast('對帳起點已儲存'); reload(); } catch (err) { fail(err); }
+    };
+    if ($('#delOp', box)) $('#delOp', box).onclick = async () => {
+      if (!confirm('清除對帳起點？（不影響對帳單明細與收支）')) return;
+      try { await api(`/reconcile/${aid}/opening`, { method: 'DELETE' }); closeModal(); toast('已清除'); reload(); } catch (err) { fail(err); }
+    };
+  } catch (e) { fail(e); }
 }
 
 async function csvMappingForm(aid, rows, filename, reload) {

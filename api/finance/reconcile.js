@@ -4,13 +4,59 @@
 //   3. 自動配對建議：同帳戶、同方向、金額相同、日期相差 ≤ 5 天的「未對帳」收支；銀行序號相同優先
 //   4. 確認配對 → 對帳單明細「已對帳」、收支 reconciled = 1；已對帳的收支不能改金額、日期、帳戶、方向或刪除
 //   5. 對帳單上有、系統沒有的 → 前端「建立收支」後再配對；不需要的明細可標「忽略」
-// 路徑：/api/reconcile/{account_id}[/profile｜/import｜/match｜/unmatch｜/ignore｜/mark｜/lines]
+//   6. 也可手動輸入／修改對帳單明細（手動輸入時對帳單餘額必填）；已對帳的明細只能改摘要、序號、餘額
+//   7. 期初：帳戶期初（bank_accounts.opening_*，系統餘額起點）＋ 對帳起點（bank_statement_openings，對帳單餘額起點）
+//      對帳單明細依日期逐日核對「前一日餘額 ± 當日存提 = 當日最後餘額」，不連續就標示（可能漏登）
+// 路徑：/api/reconcile/{account_id}[/profile｜/import｜/match｜/unmatch｜/ignore｜/mark｜/lines｜/opening｜/account-opening]
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, round } from '../lib/http.js';
 import { balances } from './bank.js';
 
 const MATCH_DAYS = 5;
 const days = (a, b) => Math.abs(Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 86400000;
+
+const numOrNull = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : round(Number(v)));
+const dedupeKey = (l) => [l.txn_date, l.direction, Number(l.amount).toFixed(2), l.ref_no || `${l.description || ''}|${l.balance ?? ''}`].join('|');
+
+/** 檢查並整理一筆明細（手動輸入／修改） */
+function cleanLine(b, { requireBalance }) {
+  if (!isDate(b.txn_date)) throw new HttpError(400, '請輸入日期');
+  if (!['入帳', '出帳'].includes(b.direction)) throw new HttpError(400, '請選擇存入或支出');
+  const amount = numOrNull(b.amount);
+  if (!amount || amount <= 0) throw new HttpError(400, '金額必須大於 0');
+  const balance = numOrNull(b.balance);
+  if (requireBalance && balance === null) throw new HttpError(400, '請輸入對帳單（存摺）上的餘額');
+  return {
+    txn_date: b.txn_date, direction: b.direction, amount, balance,
+    description: String(b.description ?? '').trim().slice(0, 300) || null,
+    ref_no: String(b.ref_no ?? '').trim().slice(0, 100) || null,
+  };
+}
+
+/** 逐日核對對帳單餘額連續性：回傳 Map(line_id → { expected, ok }) 與每日結果 */
+async function balanceChain(db, aid, opening) {
+  const { results } = await db.prepare(
+    `SELECT line_id, txn_date, direction, amount, balance FROM bank_statement_lines
+     WHERE account_id = ? AND status <> '忽略' ${opening ? 'AND txn_date > ?' : ''} ORDER BY txn_date, line_id`,
+  ).bind(aid, ...(opening ? [opening.open_date] : [])).all();
+  const days = new Map();
+  for (const l of results) { if (!days.has(l.txn_date)) days.set(l.txn_date, []); days.get(l.txn_date).push(l); }
+  let prev = opening ? opening.open_balance : null; // 前一日結束餘額
+  const byLine = new Map();
+  const breaks = [];
+  for (const [date, ls] of days) {
+    const net = ls.reduce((s, l) => s + (l.direction === '入帳' ? l.amount : -l.amount), 0);
+    const expected = prev === null ? null : round(prev + net);
+    // 當日最後餘額：同一天順序可能與銀行不同，取「與預期相符」的那筆，否則取最後一筆有餘額的
+    const withBal = ls.filter((l) => l.balance !== null);
+    const end = withBal.find((l) => expected !== null && Math.abs(l.balance - expected) < 0.005) || withBal[withBal.length - 1];
+    const ok = expected === null || !end ? null : Math.abs(end.balance - expected) < 0.005;
+    if (ok === false) breaks.push({ date, expected, statement: end.balance, diff: round(end.balance - expected) });
+    for (const l of ls) byLine.set(l.line_id, { day_expected: expected, day_ok: ok });
+    if (end) prev = end.balance; else if (prev !== null) prev = expected;
+  }
+  return { byLine, breaks, end_balance: prev };
+}
 
 async function accountOf(db, id) {
   const a = await db.prepare('SELECT * FROM bank_accounts WHERE account_id = ?').bind(toInt(id, '帳戶')).first();
@@ -83,7 +129,7 @@ export async function handleReconcile(id, sub, request, env, user) {
       const ref = String(l.ref_no ?? '').trim().slice(0, 100) || null;
       const balance = l.balance === '' || l.balance === null || l.balance === undefined || !Number.isFinite(Number(l.balance)) ? null : round(Number(l.balance));
       // 防重複：日期＋方向＋金額＋（序號，沒有序號用摘要＋餘額）；同一份檔案內完全相同的明細加流水號
-      let key = [l.txn_date, l.direction, amount.toFixed(2), ref || `${desc || ''}|${balance ?? ''}`].join('|');
+      let key = dedupeKey({ txn_date: l.txn_date, direction: l.direction, amount, ref_no: ref, description: desc, balance });
       const n = (seen.get(key) || 0) + 1;
       seen.set(key, n);
       if (n > 1) key += `#${n}`;
@@ -154,6 +200,85 @@ export async function handleReconcile(id, sub, request, env, user) {
     return json({ ok: true });
   }
 
+  if (sub === 'opening') {
+    // 對帳起點：對帳單（存摺）某日結束時的餘額
+    if (method === 'GET') {
+      return json({ data: await db.prepare('SELECT * FROM bank_statement_openings WHERE account_id = ?').bind(aid).first() });
+    }
+    if (method === 'PUT') {
+      const b = await readJson(request);
+      if (!isDate(b.open_date)) throw new HttpError(400, '請輸入對帳起點日期');
+      const bal = numOrNull(b.open_balance);
+      if (bal === null) throw new HttpError(400, '請輸入對帳起點餘額');
+      await db.prepare(
+        `INSERT INTO bank_statement_openings (account_id, open_date, open_balance, note, updated_by) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET open_date = excluded.open_date, open_balance = excluded.open_balance, note = excluded.note,
+           updated_by = excluded.updated_by, updated_at = datetime('now','+8 hours')`,
+      ).bind(aid, b.open_date, bal, String(b.note ?? '').trim() || null, user).run();
+      return json({ data: await db.prepare('SELECT * FROM bank_statement_openings WHERE account_id = ?').bind(aid).first() });
+    }
+    if (method === 'DELETE') {
+      await db.prepare('DELETE FROM bank_statement_openings WHERE account_id = ?').bind(aid).run();
+      return json({ ok: true });
+    }
+  }
+
+  if (sub === 'account-opening' && method === 'PUT') {
+    // 帳戶期初（與「主檔 → 銀行帳戶」同一組欄位）：系統餘額從這裡起算
+    const b = await readJson(request);
+    const bal = numOrNull(b.opening_balance);
+    if (bal === null) throw new HttpError(400, '請輸入帳戶期初餘額');
+    if (bal < 0) throw new HttpError(400, '期初餘額不可為負數');
+    const date = b.opening_date || null;
+    if (date && !isDate(date)) throw new HttpError(400, '期初日期格式錯誤');
+    if (date) {
+      const first = await db.prepare('SELECT MIN(txn_date) AS d FROM bank_transactions WHERE account_id = ?').bind(aid).first();
+      if (first?.d && first.d < date) throw new HttpError(409, `這個帳戶已有 ${first.d} 的收支，期初日期不能晚於最早一筆收支`);
+    }
+    await db.prepare(`UPDATE bank_accounts SET opening_balance = ?, opening_date = ?, updated_at = datetime('now','+8 hours') WHERE account_id = ?`).bind(bal, date, aid).run();
+    return json({ data: await accountOf(db, aid) });
+  }
+
+  if (sub === 'lines' && method === 'POST') {
+    // 手動輸入一筆對帳單明細（餘額必填）
+    const l = cleanLine(await readJson(request), { requireBalance: true });
+    try {
+      const r = await db.prepare(
+        `INSERT INTO bank_statement_lines (account_id, txn_date, direction, amount, description, ref_no, balance, dedupe_key, import_batch, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '手動輸入', ?)`,
+      ).bind(aid, l.txn_date, l.direction, l.amount, l.description, l.ref_no, l.balance, dedupeKey(l), user).run();
+      return json({ data: await db.prepare('SELECT * FROM bank_statement_lines WHERE line_id = ?').bind(r.meta.last_row_id).first() }, 201);
+    } catch (e) {
+      if (/UNIQUE/.test(e.message)) throw new HttpError(409, '已有一筆日期、金額、序號（或摘要＋餘額）都相同的明細');
+      throw e;
+    }
+  }
+
+  if (sub === 'lines' && method === 'PUT') {
+    // 修改明細：已對帳的只能改摘要、序號、餘額
+    const b = await readJson(request);
+    const old = await db.prepare('SELECT * FROM bank_statement_lines WHERE line_id = ? AND account_id = ?').bind(toInt(b.line_id, '明細'), aid).first();
+    if (!old) throw new HttpError(404, '明細不存在');
+    let l;
+    if (old.status === '已對帳') {
+      const changed = (b.txn_date !== undefined && b.txn_date !== old.txn_date) || (b.direction !== undefined && b.direction !== old.direction)
+        || (b.amount !== undefined && Math.abs(numOrNull(b.amount) - old.amount) >= 0.005);
+      if (changed) throw new HttpError(409, '這筆明細已對帳，不能改日期、存入／支出或金額；要改請先「取消配對」');
+      l = { ...cleanLine({ ...old, description: b.description, ref_no: b.ref_no, balance: b.balance }, { requireBalance: old.balance !== null }) };
+    } else {
+      l = cleanLine(b, { requireBalance: old.import_batch === '手動輸入' });
+    }
+    try {
+      await db.prepare(
+        `UPDATE bank_statement_lines SET txn_date = ?, direction = ?, amount = ?, description = ?, ref_no = ?, balance = ?, dedupe_key = ? WHERE line_id = ?`,
+      ).bind(l.txn_date, l.direction, l.amount, l.description, l.ref_no, l.balance, dedupeKey(l), old.line_id).run();
+    } catch (e) {
+      if (/UNIQUE/.test(e.message)) throw new HttpError(409, '已有一筆日期、金額、序號（或摘要＋餘額）都相同的明細');
+      throw e;
+    }
+    return json({ data: await db.prepare('SELECT * FROM bank_statement_lines WHERE line_id = ?').bind(old.line_id).first(), before: old });
+  }
+
   if (sub === 'lines' && method === 'DELETE') {
     // 刪除未對帳的明細（匯入錯誤時用）；可指定 batch
     const sp = new URL(request.url).searchParams;
@@ -183,6 +308,14 @@ export async function handleReconcile(id, sub, request, env, user) {
     ).bind(aid, ...(from ? [pad(from, -MATCH_DAYS)] : []), ...(to ? [pad(to, MATCH_DAYS)] : [])).all();
     const open = txns.filter((t) => !t.reconciled);
     const suggestions = suggest(lines, open);
+    const opening = await db.prepare('SELECT * FROM bank_statement_openings WHERE account_id = ?').bind(aid).first();
+    const chain = await balanceChain(db, aid, opening);
+    for (const l of lines) Object.assign(l, chain.byLine.get(l.line_id) || { day_expected: null, day_ok: null }, { before_opening: !!opening && l.txn_date <= opening.open_date });
+    let opening_check = null;
+    if (opening) {
+      const ob = (await balances(db, opening.open_date)).find((x) => x.account_id === aid);
+      opening_check = { date: opening.open_date, statement_balance: opening.open_balance, system_balance: ob?.balance ?? null, diff: ob ? round(opening.open_balance - ob.balance) : null };
+    }
     const lastWithBal = [...lines].reverse().find((l) => l.balance !== null);
     let check = null;
     if (lastWithBal) {
@@ -192,6 +325,7 @@ export async function handleReconcile(id, sub, request, env, user) {
     const inRange = (t) => (!from || t.txn_date >= from) && (!to || t.txn_date <= to);
     return json({
       account: acc, from, to, lines, txns: txns.filter((t) => inRange(t) || !t.reconciled), suggestions, check,
+      opening, opening_check, breaks: chain.breaks.filter((x) => (!from || x.date >= from) && (!to || x.date <= to)), all_breaks: chain.breaks.length,
       summary: {
         lines: lines.length, matched: lines.filter((l) => l.status === '已對帳').length, ignored: lines.filter((l) => l.status === '忽略').length,
         open_lines: lines.filter((l) => l.status === '未對帳').length, open_txns: txns.filter((t) => inRange(t) && !t.reconciled).length,

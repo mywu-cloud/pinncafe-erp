@@ -533,6 +533,8 @@
 
 `bank_import_profiles`：每個帳戶一筆 CSV 欄位對應（`mapping` JSON：略過列數、日期欄、存入／支出兩欄或單一正負金額欄、摘要、交易序號、餘額）。
 
+`bank_statement_openings`（對帳起點，每個帳戶一筆）：`open_date`、`open_balance`（存摺在該日結束時的餘額）、`note`、`updated_by`、`updated_at`。
+
 `bank_statement_lines`（對帳單明細）
 
 | 欄位 | 說明 |
@@ -542,7 +544,7 @@
 | txn_date、direction（入帳／出帳）、amount（> 0） | |
 | description、ref_no、balance | 摘要、銀行交易序號、對帳單餘額 |
 | dedupe_key | 日期｜方向｜金額｜序號或摘要｜餘額（同檔重複再加 #n）；`UNIQUE(account_id, dedupe_key)`，重複匯入自動略過 |
-| import_batch | 匯入批次 |
+| import_batch | 匯入批次；手動輸入的明細為「手動輸入」 |
 | status | 未對帳／已對帳／忽略 |
 | matched_txn_id | FK → bank_transactions |
 | created_by、created_at | |
@@ -554,6 +556,11 @@
 - 沒有對帳單的帳戶（現金）可直接把收支「標記已核對」。
 - **已對帳的收支不能修改帳戶、日期、方向、金額，也不能刪除**（轉帳的另一半已對帳亦同），要改需先取消對帳；沖帳、摘要仍可改。
 - 餘額核對：以最後一筆有餘額的對帳單明細，比較對帳單餘額與系統該日帳戶餘額。
+- **手動輸入／修改明細**：沒有 CSV 時可照存摺逐筆輸入，**手動輸入的存摺餘額必填**（CSV 匯入的餘額仍為選填）；與匯入共用防重複規則。未對帳的明細可全部修改或刪除；**已對帳的明細只能改摘要、序號、餘額**，日期、方向、金額要先取消配對。
+- **兩種期初**：
+  - 帳戶期初 = `bank_accounts.opening_balance／opening_date`（與主檔同一組欄位，對帳頁也可修改），是系統餘額的起點；期初日期不能晚於該帳戶最早一筆收支。
+  - 對帳起點 = 存摺某日結束時的餘額。系統比對起點日的系統餘額（有差額代表起點前還有收支沒登錄或沒對清）。
+- **存摺餘額連續性**：從對帳起點（未設定則從第一筆有餘額的明細）逐日檢查「前一日餘額 ± 當日存提 = 當日存摺餘額」，不連續的日期標示出來（可能漏登或餘額抄錯）。同一天的順序可能與銀行不同，所以按「日」核對；忽略的明細不計。
 
 ---
 
@@ -971,7 +978,9 @@ API：
 | 5 | 退貨在毛利 | 退貨折讓依退貨日計入；銷貨退回扣回數量、成本、加工成本；純折讓依明細金額比例分攤 |
 | 6 | 營收口徑 | 毛利分析的營收 = 明細金額 ×（1 − 整單折扣 ÷ 小計），不含運費；損益概要另列運費收入 |
 | 7 | 庫存損耗 | 損益概要的庫存損耗 = 盤虧＋試喝＋樣品＋報廢 − 盤盈（依異動成本） |
-| 8 | 已對帳鎖定 | 已對帳收支鎖住帳戶、日期、方向、金額與刪除 |
+| 8 | 已對帳鎖定 | 已對帳收支鎖住帳戶、日期、方向、金額與刪除；已對帳的對帳單明細只能改摘要、序號、餘額 |
+| 9 | 手動對帳單 | 對帳頁可手動輸入／修改對帳單明細，手動輸入時存摺餘額必填 |
+| 10 | 期初 | 對帳頁可改帳戶期初（系統起點），另設對帳起點（存摺餘額），並逐日檢查存摺餘額是否連續 |
 
 ### 角色權限
 
@@ -990,7 +999,7 @@ API：
 
 GET = 查看、其他方法 = 修改；後端每個請求都檢查（`api/lib/perm.js`），前端依 `/api/me` 隱藏沒有權限的選單。
 
-**既有資料庫升級**：直接跑 `db/schema.sql`（只新增 `users`、`audit_logs`、`bank_import_profiles`、`bank_statement_lines` 四張表）。**要在部署新版程式之前建表**，否則登入時找不到 `users` 表。
+**既有資料庫升級**：直接跑 `db/schema.sql`（只新增 `users`、`audit_logs`、`bank_import_profiles`、`bank_statement_lines`、`bank_statement_openings` 五張表）。**要在部署新版程式之前建表**，否則登入時找不到 `users` 表。
 
 ### API 一覽（Phase 5 新增）
 
@@ -1008,13 +1017,15 @@ GET = 查看、其他方法 = 修改；後端每個請求都檢查（`api/lib/pe
 | `/api/reports/loss` | GET（`?from=&to=&by=green｜roasted`） | 失重率分析（含逐月） |
 | `/api/reports/trace` | GET（`?lot_id=｜roasted_lot_id=`） | 批號追溯 |
 | `/api/reconcile` | GET | 各帳戶對帳概況 |
-| `/api/reconcile/{account_id}` | GET（`?from=&to=`） | 對帳單明細、系統收支、建議配對、餘額核對 |
+| `/api/reconcile/{account_id}` | GET（`?from=&to=`） | 對帳單明細（含逐日連續性 `day_ok`）、系統收支、建議配對、餘額核對、對帳起點與起點差額、不連續日期 `breaks` |
 | `/api/reconcile/{account_id}/profile` | GET／PUT `{ mapping }` | CSV 欄位對應 |
 | `/api/reconcile/{account_id}/import` | POST `{ lines: [{ txn_date, direction, amount, description?, ref_no?, balance? }] }` | 匯入對帳單（最多 3000 筆，重複自動略過） |
 | `/api/reconcile/{account_id}/match` | POST `{ pairs: [{ line_id, txn_id }] }` | 確認配對 |
 | `/api/reconcile/{account_id}/unmatch` | POST `{ line_id｜txn_id }` | 取消配對／取消核對 |
 | `/api/reconcile/{account_id}/ignore` | POST `{ line_id, ignore }` | 忽略／取消忽略 |
 | `/api/reconcile/{account_id}/mark` | POST `{ txn_ids, reconciled }` | 不靠對帳單直接標記已核對 |
-| `/api/reconcile/{account_id}/lines` | DELETE（`?batch=｜line_id=`） | 刪除未對帳明細 |
+| `/api/reconcile/{account_id}/lines` | POST／PUT／DELETE | 手動新增明細 `{ txn_date, direction, amount, balance, description?, ref_no? }`；修改 `{ line_id, … }`（已對帳只改摘要、序號、餘額）；刪除未對帳明細（`?batch=｜line_id=`） |
+| `/api/reconcile/{account_id}/opening` | GET／PUT `{ open_date, open_balance, note? }`／DELETE | 對帳起點 |
+| `/api/reconcile/{account_id}/account-opening` | PUT `{ opening_balance, opening_date }` | 修改帳戶期初 |
 | `/api/import/{resource}` | GET／POST `{ rows, dry_run }` | 匯入範本欄位；檢查／匯入（錯誤回 400 `{ errors: [{ line, error }] }`） |
 | `/api/backup` | GET | 全部資料表 JSON（前端轉 Excel） |
