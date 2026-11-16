@@ -11,17 +11,21 @@
 //   7. 包材耗用（Phase 4）：產品有配方 → 每包用量 × 數量扣包材庫存（包裝耗用），
 //      成本 = 包材移動平均成本，記在 packaging_cost 並加進 cost_amount；包材不足比照熟豆提醒後可存
 //   8. 有退貨／折讓的銷貨單不可修改或刪除（請先刪除退貨單）；有未作廢發票的銷貨單不可刪除
+//   9. 列印（GET /api/sales/print?ids=）：一次取回多張銷貨單的表頭、客戶聯絡資料、明細與商店資料；
+//      給客戶看的單據，所以不含成本、毛利、批次
 // 修改 = 整張重寫明細與異動，FIFO 重新計算。表頭、明細、異動在同一個 D1 batch（單一交易）。
 
 import { HttpError, json, readJson, toInt, isDate, dateRange, nowTW, round } from '../lib/http.js';
 import { makeNo, seqOf, lastSeq, seqStatement } from '../lib/docno.js';
 import { GRIND_SIZES } from '../master/resources.js';
 import { statusStatement, docPayments, docReturns, paidExpr, returnsExpr } from '../lib/payment.js';
+import { getShop } from '../system/settings.js';
 
 export const CHANNELS = ['門市', '電話', 'LINE', '官網', '蝦皮', '批發'];
 export const PAY_METHODS = ['現金', '轉帳', 'LINE Pay', '刷卡', '貨到付款', '月結'];
 export const PAY_STATUS = ['未收', '部分收款', '已收清'];
 const EPS = 0.0005;
+const PRINT_MAX = 300;
 
 /** 驗證輸入、FIFO 配批次並算出所有 auto 欄位 */
 async function prepare(db, body, { excludeSaleId = null, keepNo = null } = {}) {
@@ -319,6 +323,47 @@ export async function handleSales(id, request, env, user) {
     if (!isDate(date)) throw new HttpError(400, '日期格式錯誤');
     const ymd = date.replaceAll('-', '');
     return json({ data: { sale_no: makeNo('S', ymd, (await lastSeq(db, 'S', ymd)) + 1) } });
+  }
+
+  // ---- 列印用資料：多張銷貨單（表頭＋客戶聯絡資料＋明細）＋商店資料，不含成本 ----
+  if (id === 'print' && method === 'GET') {
+    const ids = [...new Set((url.searchParams.get('ids') || '').split(',').filter(Boolean).map((v) => toInt(v, '銷貨單')))];
+    if (!ids.length) throw new HttpError(400, '請指定要列印的銷貨單');
+    if (ids.length > PRINT_MAX) throw new HttpError(400, `一次最多列印 ${PRINT_MAX} 張銷貨單，請縮小範圍`);
+    const sales = [];
+    const items = [];
+    for (let i = 0; i < ids.length; i += 80) { // D1 每個語句最多 100 個參數
+      const part = ids.slice(i, i + 80);
+      const marks = part.map(() => '?').join(',');
+      const [h, d] = await db.batch([
+        db.prepare(
+          `SELECT s.sale_id, s.sale_no, s.sale_date, s.customer_id, s.channel, s.subtotal, s.discount, s.shipping_fee, s.total_amount,
+                  s.payment_method, s.payment_status, s.due_date, s.note,
+                  c.name AS customer_name, c.tax_id AS customer_tax_id, c.phone AS customer_phone, c.shipping_address AS customer_address,
+                  ${paidExpr('sales', 's.sale_id')} AS paid_amount,
+                  ${returnsExpr('sales', 's.sale_id')} AS returned_amount,
+                  (SELECT invoice_no FROM invoices i WHERE i.sale_id = s.sale_id AND i.status <> '作廢' ORDER BY i.invoice_id DESC LIMIT 1) AS invoice_no
+           FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
+           WHERE s.sale_id IN (${marks})`,
+        ).bind(...part),
+        db.prepare(
+          `SELECT si.sale_id, si.line_no, p.name AS product_name, si.grind_size, si.qty, si.unit_price, si.amount, si.note
+           FROM sale_items si JOIN products p ON p.product_id = si.product_id
+           WHERE si.sale_id IN (${marks}) ORDER BY si.sale_id, si.line_no`,
+        ).bind(...part),
+      ]);
+      sales.push(...h.results);
+      items.push(...d.results);
+    }
+    for (const s of sales) {
+      s.items = items.filter((it) => it.sale_id === s.sale_id);
+      s.paid_amount = round(s.paid_amount);
+      s.returned_amount = round(s.returned_amount);
+      s.net_amount = round(s.total_amount - s.returned_amount);
+      s.unpaid_amount = round(Math.max(0, s.net_amount - s.paid_amount));
+    }
+    sales.sort((a, b) => a.sale_date.localeCompare(b.sale_date) || a.sale_id - b.sale_id);
+    return json({ data: sales, shop: await getShop(db) });
   }
 
   // ---- 銷貨明細查詢（客戶購買紀錄 = 帶 customer_id）----

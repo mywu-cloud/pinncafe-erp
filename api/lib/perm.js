@@ -17,12 +17,12 @@ export const MODULE_OF = {
   returns: 'returns',
   'bank-transactions': 'finance', expenses: 'finance', finance: 'finance', 'bank-accounts': 'finance', 'expense-categories': 'finance', reconcile: 'finance',
   reports: 'reports',
-  users: 'system', 'audit-logs': 'system', backup: 'system',
+  users: 'system', 'audit-logs': 'system', backup: 'system', shop: 'system',
   'bank-codes': 'finance', 'supplier-accounts': 'purchasing',
 };
 export const MODULE_LABELS = {
   products: '主檔（產品、生豆、包材、供應商）', customers: '客戶', purchasing: '進貨', production: '烘焙／盤點／期初', inventory: '庫存查詢',
-  sales: '銷貨／訂閱／發票', returns: '退貨折讓', finance: '財務', reports: '報表', system: '系統（使用者、日誌、備份）',
+  sales: '銷貨／訂閱／發票', returns: '退貨折讓', finance: '財務', reports: '報表', system: '系統（使用者、日誌、備份、商店資料）',
 };
 const ALL = Object.keys(MODULE_LABELS);
 
