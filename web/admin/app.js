@@ -773,7 +773,7 @@ async function pageSales() {
       <button id="print">🖨 列印</button>
       <button id="add" class="primary">＋ 新增銷貨單</button>
     </div>
-    <p class="hint">列印：勾選要印的銷貨單再按「列印」（沒勾選 = 印查詢結果全部）；可選每張一頁、同客戶合併或彙總表，紙張 A4／A5／80mm 熱感紙。</p>
+    <p class="hint">列印：勾選要印的銷貨單再按「列印」（沒勾選 = 印查詢結果全部）；可選每張一頁、同客戶合併或彙總表，紙張 A4／A5 橫式／80mm 熱感紙。</p>
     <div class="stats" id="stats"></div>
     <div class="card"><div class="table-wrap" id="list"></div></div>`;
 
@@ -2101,7 +2101,7 @@ async function recipeForm(productId, reload) {
 // ---------------------------------------------------------------- 銷貨單列印
 // 三種內容 × 三種紙張，在 iframe 內預覽後呼叫瀏覽器列印（可另存 PDF）。單據給客戶看，不含成本、毛利、批次。
 const PRINT_MODES = [['each', '銷貨單（每張一頁）'], ['merge', '同客戶合併（銷貨彙整單）'], ['list', '銷貨彙總表（清單）']];
-const PRINT_PAPERS = [['a4', 'A4 直式'], ['a5', 'A5 直式（A4 對半）'], ['t80', '80mm 熱感紙']];
+const PRINT_PAPERS = [['a4', 'A4 直式'], ['a5', 'A5 橫式（A4 橫切對半）'], ['t80', '80mm 熱感紙']];
 const PRINT_MAX = 300;
 const printPref = (k, v) => {
   try { if (v === undefined) return localStorage.getItem('print.' + k); localStorage.setItem('print.' + k, v); } catch { /* 無法使用 localStorage 就不記 */ }
@@ -2152,9 +2152,10 @@ tr.sum td{font-weight:700;border-top:1pt solid #6f4e37;border-bottom:1pt solid #
 .foot{margin-top:12pt;padding-top:6pt;border-top:.5pt dashed #b9ad9f;font-size:8.5pt;color:#5f554d;text-align:center}
 .show-t{display:none}
 
-.p-a5{font-size:9pt}
+.p-a5{font-size:9pt;line-height:1.4}
+.p-a5 .head{padding-bottom:4pt}.p-a5 .info{margin:5pt 0;padding:4pt 8pt}.p-a5 .below{margin-top:5pt}.p-a5 .foot{margin-top:6pt;padding-top:4pt}
 .p-a5 .shop-name{font-size:14pt}.p-a5 .title h1{font-size:15pt;letter-spacing:4pt}.p-a5 .title .no{font-size:10pt}
-.p-a5 th,.p-a5 td{padding:3.5pt 4pt}.p-a5 th{font-size:8.5pt}.p-a5 .totals{width:50%}.p-a5 .totals .grand{font-size:11.5pt}.p-a5 .sign{margin-top:20pt}
+.p-a5 th,.p-a5 td{padding:2.5pt 5pt}.p-a5 th{font-size:8.5pt}.p-a5 .totals{width:38%}.p-a5 .totals div{padding:1pt 0}.p-a5 .totals .grand{font-size:11.5pt;margin:2pt 0;padding:2.5pt 0}.p-a5 .sign{margin-top:18pt}
 
 .p-t80{font-size:9pt;line-height:1.4}
 .p-t80 .hide-t{display:none}
@@ -2181,13 +2182,13 @@ tr.sum td{font-weight:700;border-top:1pt solid #6f4e37;border-bottom:1pt solid #
   body{background:#8d857c;padding:14px 0}
   .sheet{background:#fff;margin:0 auto 14px;box-shadow:0 2px 10px rgba(0,0,0,.35)}
   .p-a4 .sheet{width:210mm;min-height:297mm;padding:12mm}
-  .p-a5 .sheet{width:148mm;min-height:210mm;padding:8mm}
+  .p-a5 .sheet{width:210mm;min-height:148mm;padding:7mm 9mm}
   .p-t80 .sheet{width:80mm;padding:4mm}
 }
 @media print{
   .p-t80 .sheet{width:72mm;margin:0 auto;padding:2mm 0 6mm}
 }`;
-const PAGE_RULE = { a4: '@page{size:A4 portrait;margin:12mm}', a5: '@page{size:A5 portrait;margin:8mm}', t80: '@page{margin:0}' };
+const PAGE_RULE = { a4: '@page{size:A4 portrait;margin:12mm}', a5: '@page{size:A5 landscape;margin:7mm 9mm}', t80: '@page{margin:0}' };
 
 const pMoney = (n) => fmt(Math.round(Number(n) || 0), 0);
 const sumBy = (rows, f) => r2(rows.reduce((s, r) => s + (Number(f(r)) || 0), 0));
@@ -2343,6 +2344,7 @@ async function printSales(ids, onClose) {
       if (!shop.shop_name) hints.push(canWriteRes('shop') ? '尚未設定商店資料，抬頭暫以「PiNN Cafe」顯示；請到「系統 → 商店資料」填寫店名、電話、地址、匯款資訊。' : '尚未設定商店資料，請管理者到「系統 → 商店資料」填寫。');
       if (o.mode === 'merge') hints.push('同一客戶的銷貨單合併成一張；散客與只有一張的客戶仍各自一張。');
       if (o.paper === 't80') hints.push('熱感紙：列印對話框的紙張請選印表機的 80mm 紙捲、邊界選「無」。');
+      else if (o.paper === 'a5') hints.push('A5 橫式（210×148mm）：印表機放 A5 紙或裁半的 A4；列印對話框可選「另存為 PDF」，請取消「頁首及頁尾」。');
       else hints.push('列印對話框可選「另存為 PDF」傳給客戶；請取消「頁首及頁尾」。');
       $('#pHint', box).textContent = hints.join('　');
     };
