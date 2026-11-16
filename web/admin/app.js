@@ -770,8 +770,10 @@ async function pageSales() {
       <label>通路<select id="chan">${plainOpts(CHANNELS, null, '全部')}</select></label>
       <label>收款<select id="pay">${plainOpts(PAY_STATUS, null, '全部')}</select></label>
       <button id="search">查詢</button><span class="spacer"></span>
+      <button id="print">🖨 列印</button>
       <button id="add" class="primary">＋ 新增銷貨單</button>
     </div>
+    <p class="hint">列印：勾選要印的銷貨單再按「列印」（沒勾選 = 印查詢結果全部）；可選每張一頁、同客戶合併或彙總表，紙張 A4／A5／80mm 熱感紙。</p>
     <div class="stats" id="stats"></div>
     <div class="card"><div class="table-wrap" id="list"></div></div>`;
 
@@ -780,15 +782,21 @@ async function pageSales() {
       const { data, summary } = await api('/sales' + qs({ from: $('#from').value, to: $('#to').value, customer_id: $('#cust').value, product_id: $('#prod').value, channel: $('#chan').value, payment_status: $('#pay').value }));
       $('#stats').innerHTML = [['銷貨單數', fmt(summary.count), ''], ['營業額', money(summary.total_amount), 'up'], ['熟豆成本', money(summary.cost_amount), ''], ['毛利', money(summary.gross_profit), ''], ['未收款', money(summary.unpaid_amount), ''], ['出貨熟豆 kg', '−' + kg(summary.roasted_kg), 'down']]
         .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
-      $('#list').innerHTML = data.length ? `<table><thead><tr><th>銷貨日期</th><th>單號</th><th>客戶</th><th>通路</th><th class="num">明細數</th><th class="num">小計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">合計</th><th class="num">未收</th><th class="num">毛利</th><th>付款方式</th><th>收款</th></tr></thead><tbody>
-        ${data.map((r) => `<tr class="clickable" data-id="${r.sale_id}"><td>${esc(r.sale_date)}</td><td>${esc(r.sale_no)}</td><td>${r.customer_name ? esc(r.customer_name) : '<span class="tag">散客</span>'}</td><td>${esc(r.channel)}</td>
+      $('#list').innerHTML = data.length ? `<table><thead><tr><th style="width:32px"><input type="checkbox" id="pickAll" title="全選"></th><th>銷貨日期</th><th>單號</th><th>客戶</th><th>通路</th><th class="num">明細數</th><th class="num">小計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">合計</th><th class="num">未收</th><th class="num">毛利</th><th>付款方式</th><th>收款</th></tr></thead><tbody>
+        ${data.map((r) => `<tr class="clickable" data-id="${r.sale_id}"><td data-pick><input type="checkbox" class="pick" value="${r.sale_id}"></td><td>${esc(r.sale_date)}</td><td>${esc(r.sale_no)}</td><td>${r.customer_name ? esc(r.customer_name) : '<span class="tag">散客</span>'}</td><td>${esc(r.channel)}</td>
           <td class="num">${r.item_count}</td><td class="num">${money(r.subtotal)}</td><td class="num">${r.discount ? '−' + money(r.discount) : ''}</td><td class="num">${r.shipping_fee ? money(r.shipping_fee) : ''}</td>
           <td class="num up"><b>${money(r.total_amount)}</b></td><td class="num">${r.unpaid_amount ? money(r.unpaid_amount) : ''}</td><td class="num">${money(r.gross_profit)}</td><td>${esc(r.payment_method)}</td><td>${payTag(r.payment_status, r.overpaid)}</td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">此區間沒有銷貨單</div>';
       $$('#list tr.clickable').forEach((tr) => tr.onclick = () => saleForm(Number(tr.dataset.id), load));
+      $$('#list [data-pick]').forEach((td) => td.onclick = (e) => e.stopPropagation()); // 勾選不開啟銷貨單
+      if ($('#pickAll')) $('#pickAll').onchange = (e) => $$('#list .pick').forEach((c) => (c.checked = e.target.checked));
     } catch (e) { fail(e); }
   };
   $('#search').onclick = load;
+  $('#print').onclick = () => {
+    const picked = $$('#list .pick:checked').map((c) => Number(c.value));
+    printSales(picked.length ? picked : $$('#list .pick').map((c) => Number(c.value)));
+  };
   $('#add').onclick = () => saleForm(null, load);
   load();
 }
@@ -845,6 +853,7 @@ async function saleForm(id, reload) {
         ${id ? paymentsBlock(s, '收款') : '<p class="hint">收款狀態由收款沖帳決定：存檔後到「銀行收支」登錄入帳（現金、LINE Pay、刷卡也一樣）並沖銷這張單，或存檔後重新開啟這張單按「登錄收款」。</p>'}
         <div class="form-actions">
           ${id ? '<button type="button" class="danger" id="del">刪除</button>' : ''}<span class="spacer"></span>
+          ${id ? '<button type="button" id="docPrint" title="列印已存檔的內容">🖨 列印</button>' : ''}
           ${id ? '<button type="button" id="docReturn">退貨／折讓</button>' : ''}
           ${id && !(s.invoices || []).some((i) => i.status !== '作廢') ? '<button type="button" id="docInvoice">登錄發票</button>' : ''}
           ${id && s.overpaid > 0 ? '<button type="button" id="docRefund">登錄退款</button>' : ''}
@@ -861,6 +870,7 @@ async function saleForm(id, reload) {
       $('#rt2', pickBox).onclick = () => returnForm('銷貨折讓', { sale_id: id }, null, reload);
       $('#cancel', pickBox).onclick = closeModal;
     };
+    if ($('#docPrint', box)) $('#docPrint', box).onclick = () => printSales([id], () => saleForm(id, reload));
     if ($('#docInvoice', box)) $('#docInvoice', box).onclick = () => invoiceForm(id, null, reload);
     if ($('#docRefund', box)) $('#docRefund', box).onclick = () => txnForm(DIR_OUT, null, reload, { category: '其他', counterparty: s.customer_name, amount: s.overpaid, description: `${s.sale_no} 退款`, allocations: [{ doc_type: 'sales', doc_id: id, amount: s.overpaid }] });
     $$('[data-inv]', box).forEach((tr) => tr.onclick = () => invoiceForm(id, Number(tr.dataset.inv), reload));
@@ -2088,6 +2098,286 @@ async function recipeForm(productId, reload) {
   } catch (e) { fail(e); }
 }
 
+// ---------------------------------------------------------------- 銷貨單列印
+// 三種內容 × 三種紙張，在 iframe 內預覽後呼叫瀏覽器列印（可另存 PDF）。單據給客戶看，不含成本、毛利、批次。
+const PRINT_MODES = [['each', '銷貨單（每張一頁）'], ['merge', '同客戶合併（銷貨彙整單）'], ['list', '銷貨彙總表（清單）']];
+const PRINT_PAPERS = [['a4', 'A4 直式'], ['a5', 'A5 直式（A4 對半）'], ['t80', '80mm 熱感紙']];
+const PRINT_MAX = 300;
+const printPref = (k, v) => {
+  try { if (v === undefined) return localStorage.getItem('print.' + k); localStorage.setItem('print.' + k, v); } catch { /* 無法使用 localStorage 就不記 */ }
+  return null;
+};
+
+const PRINT_CSS = `
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font:10.5pt/1.5 "Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;color:#1f1a17;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.sheet{break-after:page;page-break-after:always}
+.sheet:last-child{break-after:auto;page-break-after:auto}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:12pt;border-bottom:2.2pt solid #6f4e37;padding-bottom:7pt}
+.shop-name{font-size:17pt;font-weight:700;letter-spacing:.5pt;line-height:1.25}
+.shop-info{font-size:8.5pt;color:#5f554d;margin-top:2pt}
+.title{text-align:right;white-space:nowrap}
+.title h1{margin:0;font-size:19pt;letter-spacing:5pt;color:#6f4e37;line-height:1.2}
+.title .no{font-size:11pt;font-weight:700;margin-top:3pt;font-variant-numeric:tabular-nums}
+.title .dt{font-size:9.5pt;color:#5f554d}
+.info{display:grid;grid-template-columns:1.35fr 1fr;gap:0 16pt;margin:9pt 0 8pt;padding:7pt 10pt;background:#faf7f2;border:.6pt solid #e0d6c9;border-radius:4pt}
+.info .row{display:flex;gap:6pt;padding:1.2pt 0}
+.info .k{flex:none;width:4.6em;color:#7a6f66}
+.info .v{flex:1;min-width:0;word-break:break-word}
+.info .v b{font-size:11.5pt}
+table{width:100%;border-collapse:collapse}
+thead{display:table-header-group}
+tr{break-inside:avoid;page-break-inside:avoid}
+th{background:#f1eae0;border-top:1pt solid #6f4e37;border-bottom:1pt solid #6f4e37;padding:4.5pt 6pt;text-align:left;font-size:9.5pt;font-weight:700;white-space:nowrap}
+td{padding:4.5pt 6pt;border-bottom:.5pt solid #ddd3c6;vertical-align:top}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ctr{text-align:center}
+.sub{font-size:8.5pt;color:#7a6f66}
+.nowrap{white-space:nowrap}
+tr.adj td{color:#5f554d;font-size:9.5pt}
+tr.grp td{background:#faf7f2;font-weight:700;font-size:9.5pt}
+tr.sum td{font-weight:700;border-top:1pt solid #6f4e37;border-bottom:1pt solid #6f4e37;background:#faf7f2}
+.below{display:flex;justify-content:space-between;gap:18pt;margin-top:9pt;break-inside:avoid;page-break-inside:avoid}
+.notes{flex:1;min-width:0;font-size:9.5pt}
+.notes .lbl{font-weight:700;color:#6f4e37;margin-top:5pt}
+.notes .lbl:first-child{margin-top:0}
+.pre{white-space:pre-wrap;word-break:break-word}
+.totals{flex:none;width:44%}
+.totals div{display:flex;justify-content:space-between;padding:1.6pt 0}
+.totals .grand{font-size:13pt;font-weight:700;border-top:1pt solid #6f4e37;border-bottom:1pt solid #6f4e37;margin:3pt 0;padding:4pt 0}
+.totals .due{font-weight:700}
+.sign{display:flex;gap:26pt;margin-top:26pt;break-inside:avoid;page-break-inside:avoid}
+.sign div{flex:1;border-top:.6pt solid #1f1a17;padding-top:3pt;font-size:9pt;color:#5f554d}
+.foot{margin-top:12pt;padding-top:6pt;border-top:.5pt dashed #b9ad9f;font-size:8.5pt;color:#5f554d;text-align:center}
+.show-t{display:none}
+
+.p-a5{font-size:9pt}
+.p-a5 .shop-name{font-size:14pt}.p-a5 .title h1{font-size:15pt;letter-spacing:4pt}.p-a5 .title .no{font-size:10pt}
+.p-a5 th,.p-a5 td{padding:3.5pt 4pt}.p-a5 th{font-size:8.5pt}.p-a5 .totals{width:50%}.p-a5 .totals .grand{font-size:11.5pt}.p-a5 .sign{margin-top:20pt}
+
+.p-t80{font-size:9pt;line-height:1.4}
+.p-t80 .hide-t{display:none}
+.p-t80 .show-t{display:block}
+.p-t80 tr.show-t{display:table-row}
+.p-t80 .head{display:block;text-align:center;border-bottom:1pt dashed #000;padding-bottom:5pt}
+.p-t80 .shop-name{font-size:13pt}.p-t80 .shop-info{font-size:8pt;color:#000}
+.p-t80 .title{text-align:center;margin-top:4pt;white-space:normal}
+.p-t80 .title h1{font-size:12pt;letter-spacing:3pt;color:#000}.p-t80 .title .no{font-size:10pt}.p-t80 .title .dt{color:#000}
+.p-t80 .info{display:block;background:none;border:0;border-bottom:1pt dashed #000;border-radius:0;padding:4pt 0;margin:0 0 3pt}
+.p-t80 .info .k{color:#000}
+.p-t80 th{background:none;border-top:0;border-bottom:.8pt solid #000;padding:3pt 2pt;font-size:8.5pt}
+.p-t80 td{padding:3pt 2pt;border-bottom:.5pt dotted #777}
+.p-t80 .sub,.p-t80 tr.adj td{color:#000}
+.p-t80 tr.grp td,.p-t80 tr.sum td{background:none}
+.p-t80 tr.sum td{border-top:.8pt solid #000;border-bottom:.8pt solid #000}
+.p-t80 .below{display:flex;flex-direction:column-reverse;gap:0;margin-top:4pt}
+.p-t80 .totals{width:100%}
+.p-t80 .totals .grand{font-size:12pt;border-color:#000}
+.p-t80 .notes{margin-top:5pt;font-size:8.5pt}.p-t80 .notes .lbl{color:#000}
+.p-t80 .foot{border-top:1pt dashed #000;color:#000;margin-top:6pt}
+
+@media screen{
+  body{background:#8d857c;padding:14px 0}
+  .sheet{background:#fff;margin:0 auto 14px;box-shadow:0 2px 10px rgba(0,0,0,.35)}
+  .p-a4 .sheet{width:210mm;min-height:297mm;padding:12mm}
+  .p-a5 .sheet{width:148mm;min-height:210mm;padding:8mm}
+  .p-t80 .sheet{width:80mm;padding:4mm}
+}
+@media print{
+  .p-t80 .sheet{width:72mm;margin:0 auto;padding:2mm 0 6mm}
+}`;
+const PAGE_RULE = { a4: '@page{size:A4 portrait;margin:12mm}', a5: '@page{size:A5 portrait;margin:8mm}', t80: '@page{margin:0}' };
+
+const pMoney = (n) => fmt(Math.round(Number(n) || 0), 0);
+const sumBy = (rows, f) => r2(rows.reduce((s, r) => s + (Number(f(r)) || 0), 0));
+const infoRow = (k, v) => (v ? `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>` : '');
+
+function printHead(shop, title, no, sub) {
+  const line2 = [shop.phone && `電話 ${esc(shop.phone)}`, shop.tax_id && `統編 ${esc(shop.tax_id)}`, esc(shop.contact)].filter(Boolean).join('　');
+  return `<div class="head">
+    <div><div class="shop-name">${esc(shop.shop_name || 'PiNN Cafe')}</div>
+      <div class="shop-info">${shop.address ? `<div>${esc(shop.address)}</div>` : ''}${line2 ? `<div>${line2}</div>` : ''}</div></div>
+    <div class="title"><h1>${title}</h1>${no ? `<div class="no">${esc(no)}</div>` : ''}${sub ? `<div class="dt">${sub}</div>` : ''}</div>
+  </div>`;
+}
+function printCustomer(s, right) {
+  return `<div class="info"><div>
+      ${infoRow('客戶', `<b>${esc(s.customer_name || '散客')}</b>`)}${infoRow('電話', esc(s.customer_phone))}${infoRow('統一編號', esc(s.customer_tax_id))}${infoRow('送貨地址', esc(s.customer_address))}
+    </div><div>${right}</div></div>`;
+}
+/** 合計區：rows = [[標籤, 金額字串, class]] */
+const totalsBox = (rows) => `<div class="totals">${rows.filter(Boolean).map(([k, v, c]) => `<div class="${c || ''}"><span>${k}</span><span>${v}</span></div>`).join('')}</div>`;
+function payRows(net, paid, unpaid, returned, showPay) {
+  if (!showPay) return [];
+  return [
+    returned ? ['退貨／折讓', '−' + pMoney(returned)] : null,
+    returned ? ['應收淨額', pMoney(net)] : null,
+    paid ? ['已收', pMoney(paid)] : null,
+    unpaid > 0.005 ? ['未收金額', pMoney(unpaid), 'due'] : ['收款狀態', '已收清', 'due'],
+  ];
+}
+function printNotes(shop, note, unpaid, showPay) {
+  const parts = [];
+  if (note) parts.push(`<div class="lbl">備註</div><div class="pre">${esc(note)}</div>`);
+  if (shop.bank_info && (!showPay || unpaid > 0.005)) parts.push(`<div class="lbl">匯款資訊</div><div class="pre">${esc(shop.bank_info)}</div>`);
+  return `<div class="notes">${parts.join('')}</div>`;
+}
+const printTail = (shop) => `<div class="sign hide-t"><div>經手人</div><div>客戶簽收</div></div>${shop.sales_note ? `<div class="foot pre">${esc(shop.sales_note)}</div>` : ''}`;
+/** 品名欄：熱感紙把研磨、單價收在品名下方 */
+const itemName = (it) => `${esc(it.product_name)}${it.note ? `<div class="sub">${esc(it.note)}</div>` : ''}<div class="sub show-t">${[esc(it.grind_size), '@' + pMoney(it.unit_price)].filter(Boolean).join('　')}</div>`;
+
+/** 單張銷貨單 */
+function saleSheet(s, shop, o) {
+  return `<section class="sheet">
+    ${printHead(shop, '銷貨單', s.sale_no, `日期 ${esc(s.sale_date)}`)}
+    ${printCustomer(s, `${infoRow('通路', esc(s.channel))}${infoRow('付款方式', esc(s.payment_method))}${infoRow('應收日期', esc(s.due_date))}${infoRow('發票號碼', esc(s.invoice_no))}`)}
+    <table><thead><tr><th class="ctr hide-t" style="width:2.6em">項次</th><th>品名</th><th class="hide-t">研磨</th><th class="num">數量</th><th class="num hide-t">單價</th><th class="num">金額</th></tr></thead><tbody>
+      ${s.items.map((it, i) => `<tr><td class="ctr hide-t">${i + 1}</td><td>${itemName(it)}</td><td class="hide-t nowrap">${esc(it.grind_size)}</td><td class="num">${fmt(it.qty)}</td><td class="num hide-t">${pMoney(it.unit_price)}</td><td class="num">${pMoney(it.amount)}</td></tr>`).join('')}
+    </tbody></table>
+    <div class="below">${printNotes(shop, s.note, s.unpaid_amount, o.showPay)}
+      ${totalsBox([
+        ['小計', pMoney(s.subtotal)], s.discount ? ['折扣', '−' + pMoney(s.discount)] : null, s.shipping_fee ? ['運費', pMoney(s.shipping_fee)] : null,
+        ['合計', 'NT$ ' + pMoney(s.total_amount), 'grand'],
+        ...payRows(s.net_amount, s.paid_amount, s.unpaid_amount, s.returned_amount, o.showPay),
+      ])}</div>
+    ${printTail(shop)}
+  </section>`;
+}
+
+/** 同一客戶多張合併成一張彙整單 */
+function mergedSheet(list, shop, o) {
+  const first = list[0];
+  const dates = list.map((s) => s.sale_date).sort();
+  const period = dates[0] === dates[dates.length - 1] ? dates[0] : `${dates[0]} ～ ${dates[dates.length - 1]}`;
+  const tot = {
+    subtotal: sumBy(list, (s) => s.subtotal), discount: sumBy(list, (s) => s.discount), shipping: sumBy(list, (s) => s.shipping_fee), total: sumBy(list, (s) => s.total_amount),
+    returned: sumBy(list, (s) => s.returned_amount), net: sumBy(list, (s) => s.net_amount), paid: sumBy(list, (s) => s.paid_amount), unpaid: sumBy(list, (s) => s.unpaid_amount),
+  };
+  const adj = (label, amt) => `<tr class="adj"><td class="hide-t"></td><td class="hide-t"></td><td>${label}</td><td class="hide-t"></td><td></td><td class="hide-t"></td><td class="num">${amt}</td></tr>`;
+  const body = list.map((s) => `<tr class="grp show-t"><td colspan="7">${esc(s.sale_date)}　${esc(s.sale_no)}</td></tr>` + s.items.map((it, i) => `<tr>
+      <td class="hide-t nowrap">${i ? '' : esc(s.sale_date)}</td><td class="hide-t nowrap">${i ? '' : esc(s.sale_no)}</td><td>${itemName(it)}</td><td class="hide-t nowrap">${esc(it.grind_size)}</td>
+      <td class="num">${fmt(it.qty)}</td><td class="num hide-t">${pMoney(it.unit_price)}</td><td class="num">${pMoney(it.amount)}</td></tr>`).join('')
+    + (s.discount ? adj('折扣', '−' + pMoney(s.discount)) : '') + (s.shipping_fee ? adj('運費', pMoney(s.shipping_fee)) : '')).join('');
+  const notes = list.filter((s) => s.note).map((s) => `${s.sale_no}：${s.note}`).join('\n');
+  return `<section class="sheet">
+    ${printHead(shop, '銷貨彙整單', '', `期間 ${esc(period)}`)}
+    ${printCustomer(first, `${infoRow('銷貨單數', `${list.length} 張`)}${infoRow('列印日期', today())}`)}
+    <table><thead><tr><th class="hide-t">日期</th><th class="hide-t">單號</th><th>品名</th><th class="hide-t">研磨</th><th class="num">數量</th><th class="num hide-t">單價</th><th class="num">金額</th></tr></thead><tbody>${body}</tbody></table>
+    <div class="below">${printNotes(shop, notes, tot.unpaid, o.showPay)}
+      ${totalsBox([
+        ['明細小計', pMoney(tot.subtotal)], tot.discount ? ['折扣', '−' + pMoney(tot.discount)] : null, tot.shipping ? ['運費', pMoney(tot.shipping)] : null,
+        ['合計', 'NT$ ' + pMoney(tot.total), 'grand'],
+        ...payRows(tot.net, tot.paid, tot.unpaid, tot.returned, o.showPay),
+      ])}</div>
+    ${printTail(shop)}
+  </section>`;
+}
+
+/** 銷貨彙總表：一張單一列 */
+function listSheet(list, shop, o) {
+  const dates = list.map((s) => s.sale_date).sort();
+  const period = dates[0] === dates[dates.length - 1] ? dates[0] : `${dates[0]} ～ ${dates[dates.length - 1]}`;
+  const pay = o.showPay;
+  return `<section class="sheet">
+    ${printHead(shop, '銷貨彙總表', '', `期間 ${esc(period)}`)}
+    <div class="sub" style="margin:6pt 0 4pt">共 ${list.length} 張銷貨單　列印日期 ${today()}</div>
+    <table><thead><tr><th class="hide-t">日期</th><th>單號</th><th>客戶</th><th class="hide-t">通路</th><th class="hide-t">品項</th><th class="hide-t">付款方式</th><th class="num">合計</th>${pay ? '<th class="num hide-t">已收</th><th class="num">未收</th>' : ''}</tr></thead><tbody>
+      ${list.map((s) => `<tr><td class="hide-t nowrap">${esc(s.sale_date)}</td><td class="nowrap">${esc(s.sale_no)}</td><td>${esc(s.customer_name || '散客')}</td><td class="hide-t nowrap">${esc(s.channel)}</td>
+        <td class="hide-t sub">${s.items.map((it) => `${esc(it.product_name)}${it.grind_size ? `（${esc(it.grind_size)}）` : ''}×${fmt(it.qty)}`).join('、')}</td><td class="hide-t nowrap">${esc(s.payment_method)}</td>
+        <td class="num">${pMoney(s.total_amount)}</td>${pay ? `<td class="num hide-t">${s.paid_amount ? pMoney(s.paid_amount) : ''}</td><td class="num">${s.unpaid_amount > 0.005 ? pMoney(s.unpaid_amount) : ''}</td>` : ''}</tr>`).join('')}
+      <tr class="sum"><td class="hide-t"></td><td>合計</td><td>${list.length} 張</td><td class="hide-t"></td><td class="hide-t"></td><td class="hide-t"></td>
+        <td class="num">${pMoney(sumBy(list, (s) => s.total_amount))}</td>${pay ? `<td class="num hide-t">${pMoney(sumBy(list, (s) => s.paid_amount))}</td><td class="num">${pMoney(sumBy(list, (s) => s.unpaid_amount))}</td>` : ''}</tr>
+    </tbody></table>
+  </section>`;
+}
+
+/** 產生整份列印文件（iframe srcdoc） */
+function buildPrintDoc(sales, shop, o) {
+  let sheets; let title;
+  if (o.mode === 'list') {
+    sheets = [listSheet(sales, shop, o)];
+    title = `銷貨彙總表_${today()}`;
+  } else if (o.mode === 'merge') {
+    // 同客戶合併；散客沒有客戶資料，不合併、各自一張
+    const groups = new Map();
+    for (const s of sales) {
+      const key = s.customer_id ? 'c' + s.customer_id : 's' + s.sale_id;
+      groups.set(key, [...(groups.get(key) || []), s]);
+    }
+    sheets = [...groups.values()].map((g) => (g.length > 1 ? mergedSheet(g, shop, o) : saleSheet(g[0], shop, o)));
+    title = `銷貨彙整單_${today()}`;
+  } else {
+    sheets = sales.map((s) => saleSheet(s, shop, o));
+    title = sales.length === 1 ? `銷貨單_${sales[0].sale_no}` : `銷貨單_${today()}_${sales.length}張`;
+  }
+  return `<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><title>${esc(title)}</title><style>${PAGE_RULE[o.paper]}${PRINT_CSS}</style></head><body class="p-${o.paper}">${sheets.join('')}</body></html>`;
+}
+
+/** 列印視窗：ids = 要列印的銷貨單；onClose = 關閉後要做的事（例：回到銷貨單） */
+async function printSales(ids, onClose) {
+  try {
+    if (!ids.length) return toast('沒有可列印的銷貨單', true);
+    if (ids.length > PRINT_MAX) return toast(`一次最多列印 ${PRINT_MAX} 張銷貨單，請縮小查詢範圍或改用勾選`, true);
+    const { data: sales, shop } = await api('/sales/print' + qs({ ids: ids.join(',') }));
+    const single = sales.length === 1;
+    const mode0 = single ? 'each' : (PRINT_MODES.some(([k]) => k === printPref('mode')) ? printPref('mode') : 'each');
+    const paper0 = PRINT_PAPERS.some(([k]) => k === printPref('paper')) ? printPref('paper') : 'a4';
+    const box = openModal(`
+      <h2>列印銷貨單 <span class="hint">${single ? esc(sales[0].sale_no) : `共 ${sales.length} 張`}</span></h2>
+      <div class="toolbar">
+        ${single ? '' : `<label>內容<select id="pMode">${PRINT_MODES.map(([k, v]) => `<option value="${k}" ${k === mode0 ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`}
+        <label>紙張<select id="pPaper">${PRINT_PAPERS.map(([k, v]) => `<option value="${k}" ${k === paper0 ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        <label>收款資訊<select id="pPay"><option value="1">顯示已收／未收</option><option value="0" ${printPref('pay') === '0' ? 'selected' : ''}>不顯示</option></select></label>
+        <span class="spacer"></span>
+        <button type="button" id="pClose">關閉</button><button type="button" id="pGo" class="primary">🖨 列印</button>
+      </div>
+      <p class="hint" id="pHint"></p>
+      <iframe id="pFrame" title="列印預覽" style="width:100%;height:68vh;border:1px solid var(--line);border-radius:8px;background:#8d857c"></iframe>`, true);
+    const opts = () => ({ mode: single ? 'each' : $('#pMode', box).value, paper: $('#pPaper', box).value, showPay: $('#pPay', box).value === '1' });
+    const render = () => {
+      const o = opts();
+      printPref('paper', o.paper); printPref('pay', o.showPay ? '1' : '0'); if (!single) printPref('mode', o.mode);
+      $('#pFrame', box).srcdoc = buildPrintDoc(sales, shop, o);
+      const hints = [];
+      if (!shop.shop_name) hints.push(canWriteRes('shop') ? '尚未設定商店資料，抬頭暫以「PiNN Cafe」顯示；請到「系統 → 商店資料」填寫店名、電話、地址、匯款資訊。' : '尚未設定商店資料，請管理者到「系統 → 商店資料」填寫。');
+      if (o.mode === 'merge') hints.push('同一客戶的銷貨單合併成一張；散客與只有一張的客戶仍各自一張。');
+      if (o.paper === 't80') hints.push('熱感紙：列印對話框的紙張請選印表機的 80mm 紙捲、邊界選「無」。');
+      else hints.push('列印對話框可選「另存為 PDF」傳給客戶；請取消「頁首及頁尾」。');
+      $('#pHint', box).textContent = hints.join('　');
+    };
+    $$('select', box).forEach((el) => el.onchange = render);
+    $('#pGo', box).onclick = () => { const w = $('#pFrame', box).contentWindow; w.focus(); w.print(); };
+    $('#pClose', box).onclick = () => { closeModal(); onClose?.(); };
+    render();
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- 商店資料（列印抬頭）
+async function pageShop() {
+  const { data: s } = await api('/shop');
+  const ro = canWriteRes('shop') ? '' : 'disabled';
+  $('#main').innerHTML = `
+    <h2>商店資料</h2>
+    <p class="hint">列印銷貨單時顯示在抬頭與頁尾。沒填的欄位不會印出來。</p>
+    <div class="card" style="padding:16px;max-width:760px"><form id="f">
+      <div class="form-grid">
+        <label>店名／公司名稱<input name="shop_name" maxlength="60" value="${esc(s.shop_name)}" placeholder="PiNN Cafe" ${ro}></label>
+        <label>統一編號<input name="tax_id" maxlength="8" inputmode="numeric" value="${esc(s.tax_id)}" ${ro}></label>
+        <label>電話<input name="phone" maxlength="40" value="${esc(s.phone)}" ${ro}></label>
+        <label>其他聯絡方式<input name="contact" maxlength="120" value="${esc(s.contact)}" placeholder="LINE、Email、網站" ${ro}></label>
+        <label class="full">地址<input name="address" maxlength="120" value="${esc(s.address)}" ${ro}></label>
+        <label class="full">匯款資訊（還有未收金額的銷貨單才會印）<textarea name="bank_info" rows="3" maxlength="300" placeholder="銀行（代號）分行&#10;戶名&#10;帳號" ${ro}>${esc(s.bank_info)}</textarea></label>
+        <label class="full">銷貨單備註（印在每張單最下方）<textarea name="sales_note" rows="3" maxlength="500" placeholder="例：咖啡豆請於常溫陰涼處保存，建議烘焙日起一個月內飲用完畢。" ${ro}>${esc(s.sales_note)}</textarea></label>
+      </div>
+      ${ro ? '' : '<div class="form-actions"><button class="primary">存檔</button></div>'}
+    </form></div>`;
+  $('#f').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/shop', { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) }); toast('已存檔'); } catch (err) { fail(err); }
+  };
+}
+
 // ---------------------------------------------------------------- Phase 5 共用：權限、Excel
 let ME = null; // /api/me：email、role、read、write、modules
 const ROUTE_RES = {
@@ -2095,7 +2385,7 @@ const ROUTE_RES = {
   roasts: 'roast-batches', 'stock-beans': 'inventory', 'stock-roasted': 'inventory', 'stock-packaging': 'inventory', 'stock-counts': 'stock-counts', 'opening-stock': 'opening-stock',
   bank: 'bank-transactions', expenses: 'expenses', receivables: 'finance', payables: 'finance', 'expense-summary': 'finance', reconcile: 'reconcile',
   recipes: 'recipes', 'rpt-profit': 'reports', 'rpt-pnl': 'reports', 'rpt-loss': 'reports', 'rpt-trace': 'reports', 'rpt-stock': 'inventory', 'rpt-processing': 'reports',
-  users: 'users', audit: 'audit-logs', data: 'backup', 'bank-codes': 'bank-codes',
+  users: 'users', audit: 'audit-logs', data: 'backup', 'bank-codes': 'bank-codes', shop: 'shop',
 };
 const canRead = (routeKey) => {
   if (!ME) return true;
@@ -2830,7 +3120,7 @@ function userForm(u, reload) {
 // ---------------------------------------------------------------- 操作日誌
 const RES_LABELS = {
   purchases: '進貨單', sales: '銷貨單', returns: '退貨／折讓', subscriptions: '訂閱', invoices: '發票', 'roast-batches': '烘焙批次', 'opening-stock': '期初庫存', 'stock-counts': '盤點／調整',
-  'bank-transactions': '銀行收支', expenses: '費用', reconcile: '銀行對帳', recipes: '產品配方', users: '使用者', import: '主檔匯入',
+  'bank-transactions': '銀行收支', expenses: '費用', reconcile: '銀行對帳', recipes: '產品配方', users: '使用者', import: '主檔匯入', shop: '商店資料',
   suppliers: '供應商', customers: '客戶', 'green-beans': '生豆品項', 'roasted-beans': '熟豆品項', 'packaging-items': '包材', products: '產品', 'bank-accounts': '銀行帳戶', 'expense-categories': '費用類別',
 };
 async function pageAudit() {
@@ -3011,6 +3301,7 @@ const ROUTES = {
   users: pageUsers,
   audit: pageAudit,
   data: pageData,
+  shop: pageShop,
   ...Object.fromEntries(Object.keys(MASTERS).map((k) => [k, () => pageMaster(k)])),
 };
 

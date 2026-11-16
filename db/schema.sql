@@ -684,6 +684,17 @@ CREATE INDEX IF NOT EXISTS idx_count_items_count ON stock_count_items(count_id);
 --   登入仍由 Cloudflare Access 負責；這裡決定登入後能看／能改哪些功能
 --   users 為空時，第一個登入的人自動成為管理者
 -- -------------------------------------------------------------
+-- 商店資料（列印銷貨單抬頭；key / value）
+--   key：shop_name、tax_id、phone、address、contact、bank_info、sales_note
+--   API 第一次讀取時若資料表不存在會自動建立，既有資料庫不必另外升級
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS shop_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','+8 hours'))
+);
+
+-- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
   user_id       INTEGER PRIMARY KEY AUTOINCREMENT,
   email         TEXT    NOT NULL UNIQUE COLLATE NOCASE,

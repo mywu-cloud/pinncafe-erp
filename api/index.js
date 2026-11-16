@@ -26,6 +26,7 @@ import { handleBankCodes, handleSupplierAccounts } from './master/bankaccounts.j
 import { handleReports } from './reports/reports.js';
 import { handleUsers, handleAuditLogs } from './system/users.js';
 import { handleImport, handleBackup } from './system/data.js';
+import { handleShop } from './system/settings.js';
 
 const SUBPATH_OK = new Set(['invoices', 'reconcile', 'import']);
 
@@ -58,6 +59,7 @@ async function route(request, env, user) {
   if (resource === 'audit-logs') return handleAuditLogs(id, request, env);
   if (resource === 'import') return handleImport(id, extra, request, env, user);
   if (resource === 'backup') return handleBackup(request, env);
+  if (resource === 'shop') return handleShop(id, request, env);
   throw new HttpError(404, '找不到此路徑');
 }
 
